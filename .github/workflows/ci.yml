@@ -6,9 +6,10 @@ on:
 
 permissions:
   contents: read
+  id-token: write
 
 jobs:
-  check:
+  ci:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -24,6 +25,7 @@ jobs:
         with:
           node-version-file: '.node-version'
           cache: 'pnpm'
+          registry-url: 'https://registry.npmjs.org'
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -37,33 +39,11 @@ jobs:
       - name: Build
         run: pnpm build
 
-  publish:
-    needs: check
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    permissions:
-      id-token: write
-      contents: read
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Install pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          run_install: false
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version-file: '.node-version'
-          registry-url: 'https://registry.npmjs.org'
-          package-manager-cache: false
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+      - name: End-to-end tests
+        run: pnpm e2e
 
       - name: Publish if version is new
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
           name=$(node -p "require('./package.json').name")
           version=$(node -p "require('./package.json').version")
@@ -71,4 +51,4 @@ jobs:
             echo "Already published: $name@$version"
             exit 0
           fi
-          pnpm publish --access public --no-git-checks
+          pnpm publish --access public --no-git-checks --ignore-scripts

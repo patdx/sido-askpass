@@ -13,7 +13,8 @@
     "noFallthroughCasesInSwitch": true,
     "exactOptionalPropertyTypes": true,
     "noUncheckedIndexedAccess": true,
+    "resolveJsonModule": true,
     "types": ["node"]
   },
-  "include": ["sido-askpass.ts", "scripts/**/*.ts"]
+  "include": ["src/**/*.ts", "scripts/**/*.ts", "e2e/**/*.ts"]
 }

@@ -3,18 +3,52 @@
 import { spawnSync } from 'node:child_process'
 import {
   existsSync,
+  mkdtempSync,
   readFileSync,
+  rmSync,
   writeFileSync,
-  unlinkSync,
-  chmodSync,
 } from 'node:fs'
 import { tmpdir, userInfo, hostname, homedir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { randomUUID } from 'node:crypto'
 import { parseArgs } from 'node:util'
+import package_json from '../package.json' with { type: 'json' }
 
 const self_path = resolve(process.argv[1]!)
 const command = process.argv[2]
+
+if (command === '_inner_prompt_receiver') {
+  const prompt_file = process.argv[3]
+  const fifo = process.argv[4]
+  if (!prompt_file || !fifo) process.exit(1)
+  inner_prompt_receiver(prompt_file, fifo)
+  process.exit(0)
+}
+
+// ── help / version ──────────────────────────────────────────────────────────
+
+if (command === '--help' || command === '-h' || command === 'help') {
+  console.log(`sido-askpass — SUDO_ASKPASS shim for headless agent environments
+
+Name:    sido-askpass
+Version: ${package_json.version}
+Author:  patdx
+Repo:    https://github.com/patdx/sido-askpass
+
+Usage:
+  sido-askpass                        askpass mode (invoked by sudo)
+  sido-askpass install --user|--system
+  sido-askpass uninstall --user|--system
+  sido-askpass status [--user|--system]
+  sido-askpass run <command> [args...]
+  sido-askpass --help
+  sido-askpass --version`)
+  process.exit(0)
+}
+
+if (command === '--version' || command === '-V' || command === 'version') {
+  console.log(package_json.version)
+  process.exit(0)
+}
 
 // ── install / uninstall / status ────────────────────────────────────────────
 
@@ -43,11 +77,22 @@ if (command === 'status') {
       user: { type: 'boolean' },
       system: { type: 'boolean' },
     },
-    strict: false,
   })
+  if (values.user && values.system) {
+    console.error(`[sido] usage: ${self_path} status [--user|--system]`)
+    process.exit(1)
+  }
   const scope = values.user ? '--user' : values.system ? '--system' : undefined
   do_status(scope)
   process.exit(0)
+}
+
+if (command === 'run') {
+  if (!process.argv[3]) {
+    console.error(`[sido] usage: ${self_path} run <command> [args...]`)
+    process.exit(1)
+  }
+  do_run(process.argv[3], process.argv.slice(4))
 }
 
 // ── askpass mode ───────────────────────────────────────────────────────────
@@ -55,20 +100,54 @@ if (command === 'status') {
 const prompt = (command || `[sudo] password for ${userInfo().username}: `)
   .replace(/%u/g, userInfo().username)
   .replace(/%h/g, hostname())
+const requesting_command = get_requesting_command()
+const display_prompt = requesting_command
+  ? `Command: ${requesting_command}\n${prompt}`
+  : prompt
 
-const isTmux = !!process.env.TMUX
-const isHerdr = process.env.HERDR_ENV === '1'
-const isMac = process.platform === 'darwin'
-const isLinux = process.platform === 'linux'
+const is_tmux = !!process.env.TMUX
+const is_herdr = process.env.HERDR_ENV === '1'
+const is_mac = process.platform === 'darwin'
+const is_linux = process.platform === 'linux'
 const has_display = !!(process.env.DISPLAY || process.env.WAYLAND_DISPLAY)
-const can_gui = isMac || (isLinux && has_display)
+const can_gui = is_mac || (is_linux && has_display)
 
-function tmp(): string {
-  return join(tmpdir(), `sido-${randomUUID()}`)
+interface PromptResources {
+  dir: string
+  fifo: string
+  prompt_file: string
 }
 
-function mkfifo(p: string): void {
-  spawnSync('mkfifo', [p], { stdio: ['pipe', 'pipe', 'pipe'] })
+function create_prompt_resources(): PromptResources {
+  const dir = mkdtempSync(join(tmpdir(), 'sido-'))
+  const fifo = join(dir, 'password')
+  const result = spawnSync('mkfifo', ['-m', '600', fifo], {
+    stdio: ['pipe', 'pipe', 'pipe'],
+  })
+  if (result.error || result.status !== 0) {
+    rmSync(dir, { recursive: true, force: true })
+    const detail =
+      result.error?.message ||
+      result.stderr?.toString().trim() ||
+      'unknown error'
+    throw new Error(`mkfifo failed: ${detail}`)
+  }
+  const resources = {
+    dir,
+    fifo,
+    prompt_file: join(dir, 'prompt'),
+  }
+  try {
+    writeFileSync(resources.prompt_file, display_prompt, { mode: 0o600 })
+    return resources
+  } catch (error) {
+    rmSync(dir, { recursive: true, force: true })
+    throw error
+  }
+}
+
+function remove_prompt_resources(resources: PromptResources): void {
+  rmSync(resources.dir, { recursive: true, force: true })
 }
 
 function read_stdout(r: {
@@ -79,9 +158,56 @@ function read_stdout(r: {
   return r.stdout.toString().replace(/\r?\n$/, '')
 }
 
+function read_secret(prompt: string): string {
+  const r = spawnSync(
+    'bash',
+    [
+      '-c',
+      'read -s -p "$1" pw < /dev/tty && printf \'%s\\n\' "$pw"',
+      'sido',
+      prompt,
+    ],
+    { stdio: ['ignore', 'pipe', 'inherit'] },
+  )
+  return read_stdout(r)
+}
+
+function inner_prompt_receiver(prompt_file: string, fifo: string): void {
+  const prompt = readFileSync(prompt_file, 'utf8')
+  writeFileSync(fifo, `${read_secret(prompt)}\n`)
+}
+
+function get_requesting_command(): string | undefined {
+  try {
+    let value: string
+    if (process.platform === 'linux') {
+      value = readFileSync(`/proc/${process.ppid}/cmdline`, 'utf8').replace(
+        /\0/g,
+        ' ',
+      )
+    } else {
+      const r = spawnSync(
+        'ps',
+        ['-o', 'command=', '-p', String(process.ppid)],
+        { stdio: ['pipe', 'pipe', 'pipe'] },
+      )
+      if (r.status !== 0) return
+      value = r.stdout?.toString() ?? ''
+    }
+
+    value = value
+      .replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+    return value || undefined
+  } catch {
+    return
+  }
+}
+
 function main(): void {
-  if (isTmux) return void tmux_prompt()
-  if (isHerdr) return void herdr_prompt()
+  if (is_tmux) return void tmux_prompt()
+  if (is_herdr) return void herdr_prompt()
   if (can_gui) return void gui_prompt()
   tty_prompt()
 }
@@ -94,15 +220,41 @@ function user_profile_path(): string {
   return join(homedir(), '.profile')
 }
 
+function do_run(command: string, args: string[]): never {
+  const proc = spawnSync(command, args, {
+    env: { ...process.env, SUDO_ASKPASS: self_path },
+    stdio: 'inherit',
+  })
+  if (proc.error) {
+    console.error(`[sido] failed to run ${command}: ${proc.error.message}`)
+    process.exit(1)
+  }
+  if (proc.signal) {
+    process.kill(process.pid, proc.signal)
+  }
+  process.exit(proc.status ?? 1)
+}
+
 function do_install(scope: string): void {
   if (scope === '--user') {
     const path = user_profile_path()
     const line = `export SUDO_ASKPASS="${self_path}"`
     let content = existsSync(path) ? readFileSync(path, 'utf-8') + '\n' : ''
-    if (/^export SUDO_ASKPASS=/m.test(content)) {
-      content = content.replace(/^export SUDO_ASKPASS=.*$/gm, line)
+    const managed_pattern = /^# sido\nexport SUDO_ASKPASS=.*$/gm
+    if (managed_pattern.test(content)) {
+      content = content.replace(managed_pattern, `# sido\n${line}`)
+    } else if (/^export SUDO_ASKPASS=.*$/m.test(content)) {
+      const old_values = [
+        ...content.matchAll(/^export SUDO_ASKPASS=(.*)$/gm),
+      ].map((match) => match[1])
+      for (const old_value of old_values) {
+        console.error(
+          `[sido] warning: replacing SUDO_ASKPASS=${old_value} with "${self_path}"`,
+        )
+      }
+      content = content.replace(/^export SUDO_ASKPASS=.*$/gm, `# sido\n${line}`)
     } else {
-      content += `\n# sido\nexport SUDO_ASKPASS="${self_path}"\n`
+      content += `\n# sido\n${line}\n`
     }
     writeFileSync(path, content)
     console.error(`[sido] installed to ${path}`)
@@ -141,8 +293,7 @@ function do_uninstall(scope: string): void {
       process.exit(1)
     }
     let content = readFileSync(path, 'utf-8')
-    content = content.replace(/^# sido\n/gm, '')
-    content = content.replace(/^export SUDO_ASKPASS=.*$/gm, '')
+    content = content.replace(/^# sido\nexport SUDO_ASKPASS=.*$\n?/gm, '')
     content = content.replace(/\n{3,}/g, '\n\n').trim()
     writeFileSync(path, content + '\n')
     console.error(`[sido] removed from ${path}`)
@@ -209,30 +360,56 @@ function do_status(scope?: string): void {
 
 // ── tmux ────────────────────────────────────────────────────────────────────
 //
-// We use a single bash spawnSync combining a background cat on the FIFO
-// (reader) and the blocking tmux command-prompt (writer). Shell job control
-// (&, wait) keeps both in one sync call. Native fs.readFile on a FIFO
-// can't be cancelled mid-open (libuv threadpool blocking op), whereas the
-// shell naturally reaps the background cat on cancel.
+// tmux command-prompt cannot hide input (-N means numeric-only, not secret).
+// Use a popup running bash read -s instead. The password still travels only
+// through a FIFO in a private temporary directory.
 
 function tmux_prompt(): void {
-  const fifo = tmp()
-  mkfifo(fifo)
+  const check = spawnSync('tmux', ['display-message', '-p', '#S'], {
+    stdio: ['pipe', 'pipe', 'pipe'],
+  })
+  if (check.status !== 0) {
+    const detail = check.stderr?.toString().trim()
+    if (detail) console.error(detail)
+    console.error(
+      '[sido] tmux access denied; retry the sudo command with escalated permissions',
+    )
+    process.exit(1)
+  }
 
-  const safe_prompt = prompt.replace(/"/g, '\\"')
+  let resources: PromptResources
+  try {
+    resources = create_prompt_resources()
+  } catch (error) {
+    console.error(`[sido] ${String(error)}`)
+    process.exit(1)
+  }
+
   const script = [
-    `cat "${fifo}" &`,
+    `cat "$1" &`,
     `reader=$!`,
-    `tmux command-prompt -N -p "${safe_prompt}" "run-shell 'echo \\"%1\\" > \\"${fifo}\\"'"`,
+    `tmux display-popup -E -w 60% -h 5 \\`,
+    `  -e "SIDO_ASKPASS=$2" -e "SIDO_PROMPT=$3" -e "SIDO_FIFO=$1" \\`,
+    `  '"$SIDO_ASKPASS" _inner_prompt_receiver "$SIDO_PROMPT" "$SIDO_FIFO"'`,
+    `popup_status=$?`,
+    `if [ "$popup_status" -ne 0 ]; then`,
+    `  kill "$reader" 2>/dev/null`,
+    `  wait "$reader" 2>/dev/null`,
+    `  exit "$popup_status"`,
+    `fi`,
     `wait "$reader" 2>/dev/null`,
   ].join('\n')
 
-  const r = spawnSync('bash', ['-c', script], {
-    stdio: ['inherit', 'pipe', 'inherit'],
-  })
+  let r
   try {
-    unlinkSync(fifo)
-  } catch {}
+    r = spawnSync(
+      'bash',
+      ['-c', script, 'sido', resources.fifo, self_path, resources.prompt_file],
+      { stdio: ['inherit', 'pipe', 'inherit'] },
+    )
+  } finally {
+    remove_prompt_resources(resources)
+  }
   process.stdout.write(read_stdout(r))
 }
 
@@ -242,23 +419,6 @@ function tmux_prompt(): void {
 // call and reaps the background cat on cancel.
 
 function herdr_prompt(): void {
-  const fifo = tmp()
-  const prompt_file = tmp()
-  const script_file = tmp()
-
-  mkfifo(fifo)
-  writeFileSync(prompt_file, prompt)
-  writeFileSync(
-    script_file,
-    [
-      `#!/usr/bin/env bash`,
-      `prompt=$(cat "${prompt_file}")`,
-      `read -s -p "$prompt" pw`,
-      `echo "$pw" > "${fifo}"`,
-    ].join('\n'),
-  )
-  chmodSync(script_file, 0o755)
-
   let direction = 'right'
   try {
     const layout = spawnSync('herdr', ['pane', 'layout', '--current'], {
@@ -284,30 +444,51 @@ function herdr_prompt(): void {
     ?.pane_id
   if (!pane_id) return void fallback_herdr()
 
+  let resources: PromptResources
+  try {
+    resources = create_prompt_resources()
+  } catch (error) {
+    spawnSync('herdr', ['pane', 'close', pane_id], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+    })
+    console.error(`[sido] ${String(error)}`)
+    process.exit(1)
+  }
+
   const runner_script = [
-    `cat "${fifo}" &`,
+    `cat "$2" &`,
     `reader=$!`,
-    `herdr pane run "${pane_id}" bash "${script_file}"`,
+    `herdr pane run "$1" "$3" _inner_prompt_receiver "$4" "$2"`,
+    `run_status=$?`,
+    `if [ "$run_status" -ne 0 ]; then`,
+    `  kill "$reader" 2>/dev/null`,
+    `  wait "$reader" 2>/dev/null`,
+    `  exit "$run_status"`,
+    `fi`,
     `wait "$reader" 2>/dev/null`,
   ].join('\n')
 
-  const r = spawnSync('bash', ['-c', runner_script], {
-    stdio: ['inherit', 'pipe', 'inherit'],
-  })
-
+  let r
   try {
-    unlinkSync(fifo)
-  } catch {}
-  try {
-    unlinkSync(prompt_file)
-  } catch {}
-  try {
-    unlinkSync(script_file)
-  } catch {}
-  spawnSync('herdr', ['pane', 'close', pane_id], {
-    stdio: ['pipe', 'pipe', 'pipe'],
-  })
-
+    r = spawnSync(
+      'bash',
+      [
+        '-c',
+        runner_script,
+        'sido',
+        pane_id,
+        resources.fifo,
+        self_path,
+        resources.prompt_file,
+      ],
+      { stdio: ['inherit', 'pipe', 'inherit'] },
+    )
+  } finally {
+    remove_prompt_resources(resources)
+    spawnSync('herdr', ['pane', 'close', pane_id], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+    })
+  }
   process.stdout.write(read_stdout(r))
 }
 
@@ -320,19 +501,23 @@ function fallback_herdr(): void {
 // ── GUI (macOS / Linux) ────────────────────────────────────────────────────
 
 function gui_prompt(): void {
-  if (isMac) return void mac_gui()
+  if (is_mac) return void mac_gui()
   linux_gui()
 }
 
 function mac_gui(): void {
-  const safe_prompt = prompt.replace(/"/g, '\\"')
   const r = spawnSync(
     'osascript',
     [
       '-e',
-      `display dialog "${safe_prompt}" with hidden answer default answer ""`,
+      'on run argv',
+      '-e',
+      'display dialog (item 1 of argv) with hidden answer default answer ""',
       '-e',
       'text returned of result',
+      '-e',
+      'end run',
+      display_prompt,
     ],
     { stdio: ['inherit', 'pipe', 'inherit'] },
   )
@@ -342,8 +527,8 @@ function mac_gui(): void {
 
 function linux_gui(): void {
   for (const prog of [
-    ['zenity', '--password', '--title', prompt],
-    ['kdialog', '--password', prompt],
+    ['zenity', '--password', '--title', display_prompt],
+    ['kdialog', '--password', display_prompt],
   ]) {
     const [cmd, ...args] = prog as [string, ...string[]]
     const r = spawnSync(cmd, args, { stdio: ['inherit', 'pipe', 'inherit'] })
@@ -359,13 +544,7 @@ function linux_gui(): void {
 // ── TTY fallback ───────────────────────────────────────────────────────────
 
 function tty_prompt(): void {
-  const safe_prompt = prompt.replace(/"/g, '\\"')
-  const r = spawnSync(
-    'bash',
-    ['-c', `read -s -p "${safe_prompt}" pw && echo "$pw"`],
-    { stdio: ['inherit', 'pipe', 'inherit'] },
-  )
-  process.stdout.write(read_stdout(r))
+  process.stdout.write(read_secret(display_prompt))
 }
 
 main()

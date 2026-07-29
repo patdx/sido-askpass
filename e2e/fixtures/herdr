@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+
+case "$1 $2" in
+  'pane layout')
+    printf '%s\n' '{"result":{"pane":{"width":200}}}'
+    ;;
+  'pane split')
+    if [ "${SIDO_E2E_MODE:-}" = 'split-fail' ]; then
+      exit 42
+    fi
+    printf '%s\n' '{"result":{"pane":{"pane_id":"fake-pane"}}}'
+    ;;
+  'pane run')
+    if [ "${SIDO_E2E_MODE:-}" = 'fail' ]; then
+      exit 42
+    fi
+    printf '%s\n' 'fake-password' > "$7"
+    ;;
+  'pane close')
+    printf '%s\n' "$3" >> "$SIDO_E2E_PANE_LOG"
+    ;;
+esac
