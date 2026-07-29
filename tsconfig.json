@@ -15,5 +15,5 @@
     "noUncheckedIndexedAccess": true,
     "types": ["node"]
   },
-  "include": ["sido-askpass.ts"]
+  "include": ["sido-askpass.ts", "scripts/**/*.ts"]
 }
