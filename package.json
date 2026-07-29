@@ -1,0 +1,47 @@
+{
+  "name": "sido-askpass",
+  "version": "0.1.0",
+  "description": "SUDO_ASKPASS shim for headless agent environments (tmux, Herdr, GUI, TTY)",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "sido-askpass": "dist/sido-askpass.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=24"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/patdx/sido-askpass.git"
+  },
+  "homepage": "https://github.com/patdx/sido-askpass#readme",
+  "bugs": {
+    "url": "https://github.com/patdx/sido-askpass/issues"
+  },
+  "keywords": [
+    "sudo",
+    "askpass",
+    "SUDO_ASKPASS",
+    "tmux",
+    "herdr"
+  ],
+  "packageManager": "pnpm@11.18.0+sha512.33d83c77da82f49fba836925c6f1b841181ec3132b670639bd012f7075f5c7cf634c5f870147c19aae7478fac01df09d8892e880454896edd23ee9b33757563c",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "prepublishOnly": "pnpm typecheck && pnpm build",
+    "typecheck": "tsc",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "amaro": "^1.1.11",
+    "prettier": "^3.9.6",
+    "typescript": "^7.0.2"
+  }
+}
