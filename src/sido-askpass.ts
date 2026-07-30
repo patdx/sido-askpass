@@ -1,5 +1,8 @@
 #!/usr/bin/env node
 
+// Uses type stripping (Amaro) — line numbers in dist/sido-askpass.js match
+// the .ts source exactly, so error stacks point back to the right line.
+
 import { spawnSync } from 'node:child_process'
 import {
   existsSync,
