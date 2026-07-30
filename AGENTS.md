@@ -55,7 +55,7 @@ pnpm test                   # fake tmux/Herdr commands + real FIFOs (Linux)
 
 ## Key details agents miss
 
-- This is **not** a Bun project despite the `.ts` extension — uses Node.js `child_process.spawnSync`, not `Bun.spawnSync`.
+- This is a **Node.js** project. There are no runtime deps.
 - `package.json` pins pnpm version (`packageManager`) and has dev deps only (`@types/node`, `amaro`, `prettier`, `typescript`). No runtime deps.
 - `scripts/build.ts` strips types with Amaro and writes the executable `dist/sido-askpass.js`; there is no bundle.
 - Code style: `snake_case` for all local functions and variables, no semicolons, single quotes, `verbatimModuleSyntax` (type imports must use `import type`).
