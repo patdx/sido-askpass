@@ -25,6 +25,12 @@ function escaped_source_path(): string {
   return source.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
+function newer_package_version(): string {
+  const match = package_json.version.match(/^(\d+)\.(\d+)\./)
+  assert.ok(match, `invalid package version: ${package_json.version}`)
+  return `${match[1]}.${Number(match[2]) + 1}.0`
+}
+
 let test_dir: string
 let bin_dir: string
 let prompt_tmp: string
@@ -40,6 +46,7 @@ function run({ args = ['Password: '], env = {} }: RunOptions = {}) {
   const child_env: NodeJS.ProcessEnv = {
     ...process.env,
     PATH: `${bin_dir}:${process.env.PATH}`,
+    SHELL: '/bin/sh',
     TMPDIR: prompt_tmp,
     ...env,
   }
@@ -213,7 +220,7 @@ describe('e2e', { concurrency: 1 }, (): void => {
     assert_clean()
   })
 
-  test('user install warns, marks its export, and uninstalls only its entry', () => {
+  test('user install preserves unmanaged config and uninstalls only its entry', () => {
     const home = join(test_dir, 'home')
     const profile = join(home, '.profile')
     mkdirSync(home)
@@ -227,7 +234,7 @@ describe('e2e', { concurrency: 1 }, (): void => {
       env: { HOME: home },
     })
     assert.equal(install.status, 0, install.stderr)
-    assert.match(install.stderr, /warning: replacing SUDO_ASKPASS=/)
+    assert.match(install.stderr, /warning: preserving unmanaged SUDO_ASKPASS=/)
     assert.match(
       readFileSync(profile, 'utf8'),
       /^# sido\nexport SUDO_ASKPASS=/m,
@@ -238,14 +245,74 @@ describe('e2e', { concurrency: 1 }, (): void => {
       env: { HOME: home },
     })
     assert.equal(reinstall.status, 0, reinstall.stderr)
-    assert.doesNotMatch(reinstall.stderr, /warning:/)
+    assert.equal(readFileSync(profile, 'utf8').match(/^# sido$/gm)?.length, 1)
 
     const uninstall = run({
       args: ['uninstall', '--user'],
       env: { HOME: home },
     })
     assert.equal(uninstall.status, 0, uninstall.stderr)
-    assert.equal(readFileSync(profile, 'utf8'), 'export KEEP_ME=yes\n')
+    assert.equal(
+      readFileSync(profile, 'utf8'),
+      'export KEEP_ME=yes\nexport SUDO_ASKPASS="/opt/other-askpass"\n',
+    )
+  })
+
+  test('zsh install migrates the managed entry to .zshrc after existing setup', () => {
+    const home = join(test_dir, 'home-zsh-migration')
+    const profile = join(home, '.profile')
+    const zshrc = join(home, '.zshrc')
+    mkdirSync(home)
+    writeFileSync(
+      profile,
+      'export KEEP_PROFILE=yes\n\n# sido\nexport SUDO_ASKPASS="/old/path"\n',
+    )
+    writeFileSync(zshrc, 'eval "$(fnm env)"\nexport KEEP_ZSH=yes\n')
+
+    const install = run({
+      args: ['install', '--user'],
+      env: { HOME: home, SHELL: '/bin/zsh' },
+    })
+    assert.equal(install.status, 0, install.stderr)
+    assert.equal(readFileSync(profile, 'utf8'), 'export KEEP_PROFILE=yes\n')
+    assert.equal(
+      readFileSync(zshrc, 'utf8'),
+      `eval "$(fnm env)"\nexport KEEP_ZSH=yes\n\n# sido\nexport SUDO_ASKPASS="${source}"\n`,
+    )
+    assert.match(install.stderr, /migrated user configuration from .*\.profile/)
+    assert.match(install.stderr, /restart your shell/)
+    assert.doesNotMatch(install.stderr, /source /)
+  })
+
+  test('user status and uninstall scan every supported startup file', () => {
+    const home = join(test_dir, 'home-user-scan')
+    mkdirSync(home)
+    writeFileSync(
+      join(home, '.profile'),
+      '# sido\nexport SUDO_ASKPASS="/profile/path"\n',
+    )
+    writeFileSync(
+      join(home, '.zshrc'),
+      '# sido\nexport SUDO_ASKPASS="/zsh/path"\n',
+    )
+
+    const status = run({
+      args: ['status', '--user'],
+      env: { HOME: home, SHELL: '/bin/zsh' },
+    })
+    assert.equal(status.status, 0, status.stderr)
+    assert.match(status.stderr, /\.profile: "\/profile\/path"/)
+    assert.match(status.stderr, /\.zshrc: "\/zsh\/path"/)
+
+    const uninstall = run({
+      args: ['uninstall', '--user'],
+      env: { HOME: home, SHELL: '/bin/zsh' },
+    })
+    assert.equal(uninstall.status, 0, uninstall.stderr)
+    assert.doesNotMatch(readFileSync(join(home, '.profile'), 'utf8'), /# sido/)
+    assert.doesNotMatch(readFileSync(join(home, '.zshrc'), 'utf8'), /# sido/)
+    assert.match(uninstall.stderr, /\.profile/)
+    assert.match(uninstall.stderr, /\.zshrc/)
   })
 
   test('install without a scope reapplies an existing managed install', () => {
@@ -310,7 +377,7 @@ describe('e2e', { concurrency: 1 }, (): void => {
       'if [ "$1" = root ]; then',
       `  printf '%s\\n' ${JSON.stringify(dirname(root))}`,
       'elif [ "$1" = view ]; then',
-      `  printf '"0.8.0"\\n'`,
+      `  printf '"${newer_package_version()}"\\n'`,
       'else',
       `  printf '%s\\n' "$@" > "$SIDO_E2E_NPM_LOG"`,
       'fi',
@@ -345,7 +412,7 @@ describe('e2e', { concurrency: 1 }, (): void => {
       'if [ "$1" = root ]; then',
       `  printf '%s\\n' ${JSON.stringify(dirname(root))}`,
       'elif [ "$1" = view ]; then',
-      `  printf '"0.8.0"\\n'`,
+      `  printf '"${newer_package_version()}"\\n'`,
       'else',
       '  exit 23',
       'fi',

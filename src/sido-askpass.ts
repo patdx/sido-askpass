@@ -16,7 +16,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { tmpdir, userInfo, hostname, homedir } from 'node:os'
-import { join, resolve, sep } from 'node:path'
+import { basename, join, resolve, sep } from 'node:path'
 import { parseArgs } from 'node:util'
 import package_json from '../package.json' with { type: 'json' }
 
@@ -323,8 +323,45 @@ function sudo_conf_path(): string {
   return '/etc/sudo.conf'
 }
 
+function user_profile_names(): string[] {
+  return [
+    '.profile',
+    '.bash_profile',
+    '.bash_login',
+    '.bashrc',
+    '.zprofile',
+    '.zshenv',
+    '.zshrc',
+  ]
+}
+
+function user_profile_paths(): string[] {
+  return user_profile_names().map((name) => join(homedir(), name))
+}
+
 function user_profile_path(): string {
+  const shell = basename(process.env.SHELL ?? '')
+  if (shell === 'zsh') return join(homedir(), '.zshrc')
+  if (shell === 'bash') return join(homedir(), '.bashrc')
   return join(homedir(), '.profile')
+}
+
+function managed_user_pattern(): RegExp {
+  return /^# sido\nexport SUDO_ASKPASS=.*$\n?/gm
+}
+
+function managed_user_install(path: string): string | undefined {
+  if (!existsSync(path)) return
+  return readFileSync(path, 'utf8').match(
+    /^# sido\nexport SUDO_ASKPASS=(.*)$/m,
+  )?.[1]
+}
+
+function remove_managed_user_install(content: string): string {
+  return content
+    .replace(managed_user_pattern(), '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trimEnd()
 }
 
 function parse_adapter(value: string): Adapter {
@@ -422,10 +459,8 @@ function compare_semver(left: string, right: string): number | undefined {
 }
 
 function has_managed_user_install(): boolean {
-  const path = user_profile_path()
-  return (
-    existsSync(path) &&
-    /^# sido\nexport SUDO_ASKPASS=.*$/m.test(readFileSync(path, 'utf8'))
+  return user_profile_paths().some(
+    (path) => managed_user_install(path) !== undefined,
   )
 }
 
@@ -569,28 +604,37 @@ function do_install(scope?: string): void {
 }
 
 function install_user(): void {
-  const path = user_profile_path()
+  const target_path = user_profile_path()
   const line = `export SUDO_ASKPASS="${self_path}"`
-  let content = existsSync(path) ? readFileSync(path, 'utf-8') + '\n' : ''
-  const managed_pattern = /^# sido\nexport SUDO_ASKPASS=.*$/gm
-  if (managed_pattern.test(content)) {
-    content = content.replace(managed_pattern, `# sido\n${line}`)
-  } else if (/^export SUDO_ASKPASS=.*$/m.test(content)) {
-    const old_values = [
-      ...content.matchAll(/^export SUDO_ASKPASS=(.*)$/gm),
-    ].map((match) => match[1])
-    for (const old_value of old_values) {
-      console.error(
-        `[sido] warning: replacing SUDO_ASKPASS=${old_value} with "${self_path}"`,
-      )
+  const migrated_paths: string[] = []
+
+  for (const path of user_profile_paths()) {
+    if (!existsSync(path)) continue
+    const content = readFileSync(path, 'utf8')
+    if (!managed_user_pattern().test(content)) continue
+    if (path !== target_path) {
+      writeFileSync(path, `${remove_managed_user_install(content)}\n`)
+      migrated_paths.push(path)
     }
-    content = content.replace(/^export SUDO_ASKPASS=.*$/gm, `# sido\n${line}`)
-  } else {
-    content += `\n# sido\n${line}\n`
   }
-  writeFileSync(path, content)
-  console.error(`[sido] installed to ${path}`)
-  console.error(`[sido] run: source ${path}`)
+
+  const target_content = existsSync(target_path)
+    ? remove_managed_user_install(readFileSync(target_path, 'utf8'))
+    : ''
+  for (const match of target_content.matchAll(/^export SUDO_ASKPASS=(.*)$/gm)) {
+    console.error(
+      `[sido] warning: preserving unmanaged SUDO_ASKPASS=${match[1]} in ${target_path}`,
+    )
+  }
+  const separator = target_content ? '\n\n' : ''
+  writeFileSync(target_path, `${target_content}${separator}# sido\n${line}\n`)
+
+  for (const path of migrated_paths) {
+    console.error(`[sido] migrated user configuration from ${path}`)
+  }
+  console.error(`[sido] installed to ${target_path}`)
+  console.error('[sido] restart your shell, or run:')
+  console.error(`[sido] export SUDO_ASKPASS="${self_path}"`)
 }
 
 function install_system(): void {
@@ -637,15 +681,26 @@ function normalize_uninstalled_content(content: string): string {
 
 function do_uninstall(scope: string): void {
   if (scope === '--user') {
-    const path = user_profile_path()
-    if (!existsSync(path)) {
+    const removed_paths: string[] = []
+    for (const path of user_profile_paths()) {
+      if (!existsSync(path)) continue
+      const content = readFileSync(path, 'utf8')
+      if (!managed_user_pattern().test(content)) continue
+      writeFileSync(
+        path,
+        normalize_uninstalled_content(
+          content.replace(managed_user_pattern(), ''),
+        ),
+      )
+      removed_paths.push(path)
+    }
+    if (removed_paths.length === 0) {
       console.error('[sido] nothing to uninstall')
       process.exit(1)
     }
-    let content = readFileSync(path, 'utf-8')
-    content = content.replace(/^# sido\nexport SUDO_ASKPASS=.*$\n?/gm, '')
-    writeFileSync(path, normalize_uninstalled_content(content))
-    console.error(`[sido] removed from ${path}`)
+    for (const path of removed_paths) {
+      console.error(`[sido] removed from ${path}`)
+    }
   } else {
     const path = sudo_conf_path()
     if (!existsSync(path)) {
@@ -692,16 +747,15 @@ function do_status(scope?: string): void {
   }
 
   if (!scope || scope === '--user') {
-    const user_path = user_profile_path()
-    if (existsSync(user_path)) {
-      const content = readFileSync(user_path, 'utf-8')
-      const match = content.match(/^export SUDO_ASKPASS=(.*)$/m)
-      console.error(
-        match
-          ? `[sido] user askpass in ~/.profile: ${match[1]}`
-          : `[sido] no SUDO_ASKPASS in ~/.profile`,
-      )
+    let found = false
+    for (const path of user_profile_paths()) {
+      const askpass = managed_user_install(path)
+      if (askpass === undefined) continue
+      found = true
+      console.error(`[sido] user askpass in ${path}: ${askpass}`)
     }
+    if (!found)
+      console.error('[sido] no managed user askpass in shell startup files')
   }
 
   const env_active = process.env.SUDO_ASKPASS

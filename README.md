@@ -1,8 +1,9 @@
 # sido-askpass
 
-**Name:** sido-askpass
-**Author:** patdx
-**Repo:** https://github.com/patdx/sido-askpass
+[![npm version](https://img.shields.io/npm/v/sido-askpass)](https://www.npmjs.com/package/sido-askpass)
+[![CI](https://github.com/patdx/sido-askpass/actions/workflows/ci.yml/badge.svg)](https://github.com/patdx/sido-askpass/actions/workflows/ci.yml)
+[![Node.js version](https://img.shields.io/node/v/sido-askpass)](https://nodejs.org/)
+[![License](https://img.shields.io/npm/l/sido-askpass)](https://github.com/patdx/sido-askpass/blob/main/LICENSE)
 
 `SUDO_ASKPASS` shim for tmux, Herdr, coding agents, and other environments
 without a usable TTY.
@@ -35,12 +36,20 @@ Install the command, add `SUDO_ASKPASS` to `~/.profile`, and load it into the
 current shell:
 
 ```bash
-npm install -g sido-askpass && sido-askpass install --user && . ~/.profile
+npm install -g sido-askpass && sido-askpass install --user
 ```
 
-If `.profile` already exports another `SUDO_ASKPASS`, installation prints the
-old and new values before replacing it. Uninstall removes only the entry marked
-as managed by sido.
+User setup selects the startup file from `$SHELL`: `~/.zshrc` for zsh,
+`~/.bashrc` for Bash, and `~/.profile` for other shells. The managed entry is
+appended after existing shell setup so tools such as fnm are initialized first.
+Existing sido-managed entries in other supported startup files are migrated to
+the selected file. Unmanaged `SUDO_ASKPASS` entries are preserved.
+
+Restart the shell after installation, or activate the current session with the
+exact `export SUDO_ASKPASS=...` command printed by the installer.
+Shell startup configuration covers interactive shell sessions; GUI applications
+launched without that shell environment may not inherit `SUDO_ASKPASS` or a
+version-manager-provided Node path.
 
 ### System setup
 
