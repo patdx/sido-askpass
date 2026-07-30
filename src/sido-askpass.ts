@@ -39,7 +39,7 @@ Usage:
   sido-askpass install --user|--system
   sido-askpass uninstall --user|--system
   sido-askpass status [--user|--system]
-  sido-askpass run <command> [args...]
+  sido-askpass run <command> [args...]  run <command> with SUDO_ASKPASS set
   sido-askpass --help
   sido-askpass --version`)
   process.exit(0)
@@ -267,8 +267,19 @@ function do_install(scope: string): void {
       const r = spawnSync('cat', [path], { stdio: ['pipe', 'pipe', 'pipe'] })
       content = r.stdout?.toString() ?? ''
     }
-    if (/^Path askpass /m.test(content)) {
-      content = content.replace(/^Path askpass .*$/gm, line)
+    const managed_pattern = /^# sido\nPath askpass .*$/gm
+    if (managed_pattern.test(content)) {
+      content = content.replace(managed_pattern, `# sido\n${line}`)
+    } else if (/^Path askpass /m.test(content)) {
+      const old_values = [...content.matchAll(/^Path askpass (.*)$/gm)].map(
+        (match) => match[1],
+      )
+      for (const old_value of old_values) {
+        console.error(
+          `[sido] warning: replacing Path askpass ${old_value} with "${self_path}"`,
+        )
+      }
+      content = content.replace(/^Path askpass .*$/gm, `# sido\n${line}`)
     } else {
       content += `\n# sido\n${line}\n`
     }
@@ -358,6 +369,29 @@ function do_status(scope?: string): void {
   }
 }
 
+// Background `cat` drains the FIFO back to the parent while a blocking command
+// (tmux popup / herdr pane run) fills it. Shell job control reaps the reader on
+// cancel — see AGENTS.md: native fs open() on a FIFO cannot be cancelled from JS,
+// but the shell naturally reaps the background cat on cancel.
+function fifo_drain_script(
+  fifo_ref: string,
+  block_cmd: string,
+  status_var: string,
+): string {
+  return [
+    `cat "${fifo_ref}" &`,
+    `reader=$!`,
+    block_cmd,
+    `${status_var}=$?`,
+    `if [ "$${status_var}" -ne 0 ]; then`,
+    `  kill "$reader" 2>/dev/null`,
+    `  wait "$reader" 2>/dev/null`,
+    `  exit "$${status_var}"`,
+    `fi`,
+    `wait "$reader" 2>/dev/null`,
+  ].join('\n')
+}
+
 // ── tmux ────────────────────────────────────────────────────────────────────
 //
 // tmux command-prompt cannot hide input (-N means numeric-only, not secret).
@@ -385,20 +419,12 @@ function tmux_prompt(): void {
     process.exit(1)
   }
 
-  const script = [
-    `cat "$1" &`,
-    `reader=$!`,
+  const block_cmd = [
     `tmux display-popup -E -w 60% -h 5 \\`,
     `  -e "SIDO_ASKPASS=$2" -e "SIDO_PROMPT=$3" -e "SIDO_FIFO=$1" \\`,
     `  '"$SIDO_ASKPASS" _inner_prompt_receiver "$SIDO_PROMPT" "$SIDO_FIFO"'`,
-    `popup_status=$?`,
-    `if [ "$popup_status" -ne 0 ]; then`,
-    `  kill "$reader" 2>/dev/null`,
-    `  wait "$reader" 2>/dev/null`,
-    `  exit "$popup_status"`,
-    `fi`,
-    `wait "$reader" 2>/dev/null`,
   ].join('\n')
+  const script = fifo_drain_script('$1', block_cmd, 'popup_status')
 
   let r
   try {
@@ -455,18 +481,8 @@ function herdr_prompt(): void {
     process.exit(1)
   }
 
-  const runner_script = [
-    `cat "$2" &`,
-    `reader=$!`,
-    `herdr pane run "$1" "$3" _inner_prompt_receiver "$4" "$2"`,
-    `run_status=$?`,
-    `if [ "$run_status" -ne 0 ]; then`,
-    `  kill "$reader" 2>/dev/null`,
-    `  wait "$reader" 2>/dev/null`,
-    `  exit "$run_status"`,
-    `fi`,
-    `wait "$reader" 2>/dev/null`,
-  ].join('\n')
+  const block_cmd = `herdr pane run "$1" "$3" _inner_prompt_receiver "$4" "$2"`
+  const runner_script = fifo_drain_script('$2', block_cmd, 'run_status')
 
   let r
   try {
@@ -522,7 +538,7 @@ function mac_gui(): void {
     { stdio: ['inherit', 'pipe', 'inherit'] },
   )
   if (r.status !== 0) process.exit(1)
-  process.stdout.write(r.stdout?.toString().trim() ?? '')
+  process.stdout.write(r.stdout?.toString().replace(/\r?\n$/, '') ?? '')
 }
 
 function linux_gui(): void {

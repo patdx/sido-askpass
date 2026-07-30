@@ -13,6 +13,7 @@ import {
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import package_json from '../package.json' with { type: 'json' }
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const source = join(root, 'src', 'sido-askpass.ts')
@@ -175,6 +176,37 @@ try {
     const result = run({ args: ['status', '--user', '--system'] })
     assert.equal(result.status, 1)
     assert.match(result.stderr, /status \[--user\|--system\]/)
+  })
+
+  test('--version prints the package version', () => {
+    const result = run({ args: ['--version'] })
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(result.stdout.trim(), package_json.version)
+  })
+
+  test('--help prints usage', () => {
+    const result = run({ args: ['--help'] })
+    assert.equal(result.status, 0, result.stderr)
+    assert.match(result.stdout, /Usage:/)
+    assert.match(result.stdout, /askpass mode/)
+  })
+
+  test('run sets SUDO_ASKPASS for the child command', () => {
+    const out = join(test_dir, 'run-env')
+    const result = run({
+      args: ['run', 'bash', '-c', `printf '%s' "$SUDO_ASKPASS" > "${out}"`],
+    })
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(readFileSync(out, 'utf8'), source)
+  })
+
+  test('status --user reports the installed askpass', () => {
+    const home = join(test_dir, 'home-status')
+    mkdirSync(home)
+    run({ args: ['install', '--user'], env: { HOME: home } })
+    const result = run({ args: ['status', '--user'], env: { HOME: home } })
+    assert.equal(result.status, 0, result.stderr)
+    assert.match(result.stderr, /user askpass in/)
   })
 } finally {
   rmSync(test_dir, { recursive: true, force: true })
