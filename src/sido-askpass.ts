@@ -21,6 +21,17 @@ import package_json from '../package.json' with { type: 'json' }
 
 const self_path = resolve(process.argv[1]!)
 const command = process.argv[2]
+const adapters = [
+  'auto',
+  'tmux',
+  'herdr',
+  'osascript',
+  'zenity',
+  'kdialog',
+  'tty',
+  'watch',
+] as const
+type Adapter = (typeof adapters)[number]
 
 if (command === '_inner_prompt_receiver') {
   const prompt_file = process.argv[3]
@@ -45,14 +56,25 @@ Usage:
   sido-askpass install --user|--system
   sido-askpass uninstall --user|--system
   sido-askpass status [--user|--system]
-  sido-askpass run <command> [args...]  run <command> with SUDO_ASKPASS set
-  sido-askpass watch                     wait for and approve pending requests
-  sido-askpass approve                   approve the most recent pending request
+  sido-askpass run [--adapter <name>] -- <command> [args...]
+                                       run a command with SUDO_ASKPASS set
+  sido-askpass watch                    wait for and approve pending requests
+  sido-askpass approve                  approve the most recent pending request
   sido-askpass --help
   sido-askpass --version
 
+Adapters:
+  auto       detect the best adapter (default)
+  tmux       hidden prompt in a tmux popup
+  herdr      hidden prompt in a temporary Herdr pane
+  osascript  native macOS password dialog
+  zenity     Zenity password dialog
+  kdialog    KDE password dialog
+  tty        hidden prompt on /dev/tty
+  watch      approve from another terminal with "sido-askpass approve"
+
 Env:
-  SIDO_WATCH=1             force watch mode (skip inline TTY read)
+  SIDO_ADAPTER=<name>      select an adapter for askpass mode
   SIDO_WATCH_TIMEOUT=<sec> approver wait timeout (default 120)`)
   process.exit(0)
 }
@@ -100,11 +122,8 @@ if (command === 'status') {
 }
 
 if (command === 'run') {
-  if (!process.argv[3]) {
-    console.error(`[sido] usage: ${self_path} run <command> [args...]`)
-    process.exit(1)
-  }
-  do_run(process.argv[3], process.argv.slice(4))
+  const run = parse_run_args(process.argv.slice(3))
+  do_run(run.command, run.args, run.adapter)
 }
 
 if (command === 'watch') {
@@ -133,6 +152,7 @@ const is_mac = process.platform === 'darwin'
 const is_linux = process.platform === 'linux'
 const has_display = !!(process.env.DISPLAY || process.env.WAYLAND_DISPLAY)
 const can_gui = is_mac || (is_linux && has_display)
+const selected_adapter = parse_adapter(process.env.SIDO_ADAPTER ?? 'auto')
 
 interface PromptResources {
   dir: string
@@ -231,12 +251,39 @@ function get_requesting_command(): string | undefined {
 }
 
 function main(): void {
+  if (selected_adapter !== 'auto') return void adapter_prompt(selected_adapter)
   if (is_tmux) return void tmux_prompt()
-  if (is_herdr) return void herdr_prompt()
+  if (is_herdr) return void herdr_prompt(true)
   if (can_gui) return void gui_prompt()
-  if (process.env.SIDO_WATCH !== '1' && interactive_shell_tty() && tty_prompt())
-    return
+  if (interactive_shell_tty() && tty_prompt()) return
   watch_prompt()
+}
+
+function adapter_prompt(adapter: Exclude<Adapter, 'auto'>): void {
+  if (adapter === 'tmux') return void tmux_prompt()
+  if (adapter === 'herdr') return void herdr_prompt(false)
+  if (adapter === 'osascript') {
+    if (!is_mac) adapter_unavailable(adapter, 'requires macOS')
+    return void mac_gui()
+  }
+  if (adapter === 'zenity')
+    return void exact_gui_prompt('zenity', [
+      '--password',
+      '--title',
+      display_prompt,
+    ])
+  if (adapter === 'kdialog')
+    return void exact_gui_prompt('kdialog', ['--password', display_prompt])
+  if (adapter === 'tty') {
+    if (!tty_prompt()) adapter_unavailable(adapter, 'could not read /dev/tty')
+    return
+  }
+  watch_prompt()
+}
+
+function adapter_unavailable(adapter: Adapter, detail: string): never {
+  console.error(`[sido] ${adapter} adapter unavailable: ${detail}`)
+  process.exit(1)
 }
 
 // Returns true when /dev/tty is our controlling terminal and it is in canonical
@@ -263,9 +310,52 @@ function user_profile_path(): string {
   return join(homedir(), '.profile')
 }
 
-function do_run(command: string, args: string[]): never {
+function parse_adapter(value: string): Adapter {
+  if ((adapters as readonly string[]).includes(value)) return value as Adapter
+  console.error(
+    `[sido] unknown adapter "${value}"; expected one of: ${adapters.join(', ')}`,
+  )
+  process.exit(1)
+}
+
+function parse_run_args(args: string[]): {
+  command: string
+  args: string[]
+  adapter?: Adapter
+} {
+  const separator = args.indexOf('--')
+  if (separator === -1 || !args[separator + 1]) {
+    console.error(
+      `[sido] usage: ${self_path} run [--adapter <name>] -- <command> [args...]`,
+    )
+    process.exit(1)
+  }
+
+  let adapter_value: string | undefined
+  try {
+    adapter_value = parseArgs({
+      args: args.slice(0, separator),
+      options: { adapter: { type: 'string' } },
+    }).values.adapter
+  } catch (error) {
+    console.error(`[sido] ${String(error)}`)
+    process.exit(1)
+  }
+
+  return {
+    command: args[separator + 1]!,
+    args: args.slice(separator + 2),
+    ...(adapter_value ? { adapter: parse_adapter(adapter_value) } : {}),
+  }
+}
+
+function do_run(command: string, args: string[], adapter?: Adapter): never {
   const proc = spawnSync(command, args, {
-    env: { ...process.env, SUDO_ASKPASS: self_path },
+    env: {
+      ...process.env,
+      SUDO_ASKPASS: self_path,
+      ...(adapter ? { SIDO_ADAPTER: adapter } : {}),
+    },
     stdio: 'inherit',
   })
   if (proc.error) {
@@ -487,7 +577,7 @@ function tmux_prompt(): void {
 // herdr pane run. Shell job control (&, wait) keeps coordination in one sync
 // call and reaps the background cat on cancel.
 
-function herdr_prompt(): void {
+function herdr_prompt(allow_fallback: boolean): void {
   let direction = 'right'
   try {
     const layout = spawnSync('herdr', ['pane', 'layout', '--current'], {
@@ -508,10 +598,10 @@ function herdr_prompt(): void {
     ['pane', 'split', '--current', '--direction', direction, '--cwd', '/'],
     { stdio: ['inherit', 'pipe', 'pipe'] },
   )
-  if (split.status !== 0) return void fallback_herdr()
+  if (split.status !== 0) return void fallback_herdr(allow_fallback)
   const pane_id = JSON.parse(split.stdout?.toString() ?? '{}').result?.pane
     ?.pane_id
-  if (!pane_id) return void fallback_herdr()
+  if (!pane_id) return void fallback_herdr(allow_fallback)
 
   let resources: PromptResources
   try {
@@ -551,11 +641,12 @@ function herdr_prompt(): void {
   process.stdout.write(read_stdout(r))
 }
 
-function fallback_herdr(): void {
+function fallback_herdr(allow_fallback: boolean): void {
+  if (!allow_fallback) adapter_unavailable('herdr', 'herdr pane split failed')
   console.error('[sido] herdr pane split failed, falling back')
   if (can_gui) return void gui_prompt()
   if (tty_prompt()) return
-  process.exit(1)
+  watch_prompt()
 }
 
 // ── GUI (macOS / Linux) ────────────────────────────────────────────────────
@@ -593,14 +684,28 @@ function linux_gui(): void {
     ['kdialog', '--password', display_prompt],
   ]) {
     const [cmd, ...args] = prog as [string, ...string[]]
-    const r = spawnSync(cmd, args, { stdio: ['inherit', 'pipe', 'inherit'] })
-    if (r.status === 0) {
-      process.stdout.write(r.stdout?.toString().replace(/\n$/, '') ?? '')
-      return
-    }
+    if (gui_program_prompt(cmd, args)) return
   }
   console.error('[sido] no GUI dialog found')
-  tty_prompt()
+  if (tty_prompt()) return
+  watch_prompt()
+}
+
+function exact_gui_prompt(command: string, args: string[]): void {
+  if (!gui_program_prompt(command, args))
+    adapter_unavailable(
+      command as Adapter,
+      `${command} failed or was cancelled`,
+    )
+}
+
+function gui_program_prompt(command: string, args: string[]): boolean {
+  const r = spawnSync(command, args, {
+    stdio: ['inherit', 'pipe', 'inherit'],
+  })
+  if (r.status !== 0) return false
+  process.stdout.write(r.stdout?.toString().replace(/\n$/, '') ?? '')
+  return true
 }
 
 // ── TTY fallback ───────────────────────────────────────────────────────────

@@ -132,16 +132,16 @@ describe('e2e', { concurrency: 1 }, (): void => {
     assert_clean()
   })
 
-  test('Herdr split failure falls back without allocating artifacts', () => {
+  test('forced Herdr split failure exits without falling back', () => {
     const result = run({
       env: {
-        HERDR_ENV: '1',
+        SIDO_ADAPTER: 'herdr',
         SIDO_E2E_MODE: 'split-fail',
         SIDO_E2E_PANE_LOG: pane_log,
       },
     })
     assert.equal(result.status, 1)
-    assert.match(result.stderr, /herdr pane split failed/)
+    assert.match(result.stderr, /herdr adapter unavailable/)
     assert_clean()
   })
 
@@ -197,15 +197,46 @@ describe('e2e', { concurrency: 1 }, (): void => {
     assert.equal(result.status, 0, result.stderr)
     assert.match(result.stdout, /Usage:/)
     assert.match(result.stdout, /askpass mode/)
+    for (const adapter of [
+      'auto',
+      'tmux',
+      'herdr',
+      'osascript',
+      'zenity',
+      'kdialog',
+      'tty',
+      'watch',
+    ]) {
+      assert.match(result.stdout, new RegExp(`^  ${adapter} `, 'm'))
+    }
   })
 
-  test('run sets SUDO_ASKPASS for the child command', () => {
+  test('run requires -- and sets SUDO_ASKPASS and the adapter', () => {
     const out = join(test_dir, 'run-env')
     const result = run({
-      args: ['run', 'bash', '-c', `printf '%s' "$SUDO_ASKPASS" > "${out}"`],
+      args: [
+        'run',
+        '--adapter',
+        'watch',
+        '--',
+        'bash',
+        '-c',
+        `printf '%s\\n%s' "$SUDO_ASKPASS" "$SIDO_ADAPTER" > "${out}"`,
+      ],
     })
     assert.equal(result.status, 0, result.stderr)
-    assert.equal(readFileSync(out, 'utf8'), source)
+    assert.equal(readFileSync(out, 'utf8'), `${source}\nwatch`)
+
+    const missing_separator = run({ args: ['run', 'true'] })
+    assert.equal(missing_separator.status, 1)
+    assert.match(missing_separator.stderr, /run .* -- <command>/)
+  })
+
+  test('unknown adapter exits with the allowed values', () => {
+    const result = run({ env: { SIDO_ADAPTER: 'nope' } })
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /unknown adapter "nope"/)
+    assert.match(result.stderr, /auto, tmux, herdr, osascript/)
   })
 
   test('status --user reports the installed askpass', () => {
@@ -224,7 +255,7 @@ describe('e2e', { concurrency: 1 }, (): void => {
       args: ['Password: '],
       env: {
         XDG_RUNTIME_DIR: runtime,
-        SIDO_WATCH: '1',
+        SIDO_ADAPTER: 'watch',
         SIDO_WATCH_TIMEOUT: '1',
       },
     })
@@ -241,7 +272,7 @@ describe('e2e', { concurrency: 1 }, (): void => {
       ...process.env,
       PATH: `${bin_dir}:${process.env.PATH}`,
       XDG_RUNTIME_DIR: runtime,
-      SIDO_WATCH: '1',
+      SIDO_ADAPTER: 'watch',
       SIDO_WATCH_TIMEOUT: '10',
     }
     delete env.TMUX

@@ -27,8 +27,15 @@ if [ "${SIDO_E2E_MODE:-}" = 'fail' ]; then
   exit 42
 fi
 
-stat -c '%a' \
-  "$(dirname "$SIDO_FIFO")" \
-  "$SIDO_FIFO" \
-  "$SIDO_PROMPT" > "$SIDO_E2E_MODE_LOG"
+if [ "$(uname -s)" = 'Darwin' ]; then
+  stat -f '%Lp' \
+    "$(dirname "$SIDO_FIFO")" \
+    "$SIDO_FIFO" \
+    "$SIDO_PROMPT" > "$SIDO_E2E_MODE_LOG"
+else
+  stat -c '%a' \
+    "$(dirname "$SIDO_FIFO")" \
+    "$SIDO_FIFO" \
+    "$SIDO_PROMPT" > "$SIDO_E2E_MODE_LOG"
+fi
 printf '%s\n' 'fake-password' > "$SIDO_FIFO"

@@ -53,21 +53,21 @@ npm install -g sido-askpass && sido-askpass install --system
 System setup runs `sudo tee` to update `/etc/sudo.conf`, so the installation
 command itself must be run somewhere sudo can authenticate.
 
-For a single session without changing a profile or sudo configuration:
+To use sido for one command without changing your profile or sudo
+configuration:
 
 ```bash
-export SUDO_ASKPASS=$(command -v sido-askpass)
+sido-askpass run -- sudo -A <command>
 ```
 
-Alternatively, inject `SUDO_ASKPASS` for one command:
-
-```bash
-sido-askpass run sudo -A <command>
-```
-
-Everything after `run` is run directly without shell parsing. `run` sets
+Everything after `--` is run directly without shell parsing. `run` sets
 `SUDO_ASKPASS` but does not add `-A` or otherwise rewrite the command, so pass
-`-A` explicitly when sudo must use askpass even if a TTY is available.
+`-A` explicitly when sudo must use askpass even if a TTY is available. Select
+an exact prompt adapter for the command with:
+
+```bash
+sido-askpass run --adapter watch -- sudo -A <command>
+```
 
 ## Using sudo
 
@@ -141,7 +141,7 @@ This gives Codex an actionable reason to retry with escalated permission.
 
 ## Prompt backend compatibility
 
-The first matching context is used:
+By default, `SIDO_ADAPTER=auto` uses the first matching context:
 
 | Context                      | Prompt method                                    | Status                  |
 | ---------------------------- | ------------------------------------------------ | ----------------------- |
@@ -151,6 +151,28 @@ The first matching context is used:
 | Linux + `$DISPLAY` / Wayland | `zenity`, then `kdialog`                         | Tested on Linux         |
 | Canonical `/dev/tty`         | Hidden `read -s` prompt on `/dev/tty`            | Fallback                |
 | Raw/no TTY                   | Watch mode: park request + FIFO, `approve`       | New                     |
+
+Set `SIDO_ADAPTER` to bypass detection and require one exact adapter:
+
+| Adapter     | Behavior                                              |
+| ----------- | ----------------------------------------------------- |
+| `auto`      | Use the detection chain above; this is the default    |
+| `tmux`      | Open a hidden prompt in a tmux popup                  |
+| `herdr`     | Open a hidden prompt in a temporary Herdr pane        |
+| `osascript` | Open the native macOS password dialog; requires macOS |
+| `zenity`    | Open a Zenity password dialog                         |
+| `kdialog`   | Open a KDE password dialog                            |
+| `tty`       | Read a hidden password from `/dev/tty`                |
+| `watch`     | Wait for `sido-askpass approve` from another terminal |
+
+An explicitly selected adapter either succeeds or exits with an error. It never
+falls back to another adapter. `run` accepts the same selection as
+`--adapter <name>`:
+
+```bash
+SIDO_ADAPTER=osascript sudo -A <command>
+sido-askpass run --adapter tty -- sudo -A <command>
+```
 
 The prompt also shows the requesting command when the parent process command
 line is available. If process inspection is blocked, it silently shows the
@@ -171,9 +193,9 @@ sido-askpass watch     # approve requests as they arrive (Ctrl-C to exit)
 
 The original terminal prints a hint telling you which command to run. Requests
 live under `$XDG_RUNTIME_DIR/sido` (or `~/.cache/sido`); the password travels
-through a kernel FIFO, never a file. `SIDO_WATCH=1` forces watch mode;
-`SIDO_WATCH_TIMEOUT=<sec>` sets how long the shim waits before giving up
-(default 120).
+through a kernel FIFO, never a file. `SIDO_ADAPTER=watch` selects watch mode;
+`SIDO_WATCH_TIMEOUT=<sec>` sets how long it waits before giving up (default
+120).
 
 ## Status and removal
 
