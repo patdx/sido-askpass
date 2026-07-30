@@ -815,6 +815,26 @@ function close_herdr_pane(pane_id: string): void {
   })
 }
 
+function herdr_receiver_script(): string {
+  return [
+    `"$1" _inner_prompt_receiver "$2" "$3" &`,
+    `receiver=$!`,
+    `(`,
+    `  while kill -0 "$4" 2>/dev/null; do`,
+    `    sleep 0.2`,
+    `  done`,
+    `  rm -rf -- "$5"`,
+    `  herdr pane close "$6" >/dev/null 2>&1`,
+    `) &`,
+    `watchdog=$!`,
+    `wait "$receiver"`,
+    `receiver_status=$?`,
+    `kill "$watchdog" 2>/dev/null`,
+    `wait "$watchdog" 2>/dev/null`,
+    `exit "$receiver_status"`,
+  ].join('\n')
+}
+
 function herdr_prompt(allow_fallback: boolean): void {
   const direction = herdr_split_direction()
   console.error(
@@ -833,7 +853,8 @@ function herdr_prompt(allow_fallback: boolean): void {
     process.exit(1)
   }
 
-  const block_cmd = `herdr pane run "$1" "$3" _inner_prompt_receiver "$4" "$2"`
+  const block_cmd =
+    `herdr pane run "$1" bash -c "$7" sido ` + `"$3" "$4" "$2" "$5" "$6" "$1"`
   const runner_script = fifo_drain_script('$2', block_cmd, 'run_status')
 
   let result
@@ -848,6 +869,9 @@ function herdr_prompt(allow_fallback: boolean): void {
         resources.fifo,
         self_path,
         resources.prompt_file,
+        String(process.pid),
+        resources.dir,
+        herdr_receiver_script(),
       ],
       { stdio: ['inherit', 'pipe', 'inherit'] },
     )

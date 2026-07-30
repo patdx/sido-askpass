@@ -60,6 +60,27 @@ function assert_clean(): void {
   assert.deepEqual(readdirSync(prompt_tmp), [])
 }
 
+function process_exists(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function wait_for(
+  predicate: () => boolean,
+  timeout_ms: number = 3_000,
+): Promise<void> {
+  const deadline = Date.now() + timeout_ms
+  while (!predicate()) {
+    if (Date.now() >= deadline)
+      throw new Error('timed out waiting for condition')
+    await new Promise((resolve) => setTimeout(resolve, 25))
+  }
+}
+
 function install_fake_npm(home_name: string, script: string): string {
   const home = join(test_dir, home_name)
   const npm = join(bin_dir, 'npm')
@@ -142,6 +163,39 @@ describe('e2e', { concurrency: 1 }, (): void => {
     })
     assert.equal(result.status, 1)
     assert.equal(result.signal, null)
+    assert.equal(readFileSync(pane_log, 'utf8'), 'fake-pane\n')
+    assert_clean()
+  })
+
+  test('Herdr closes its pane and receiver when the askpass process dies', async () => {
+    writeFileSync(pane_log, '')
+    const receiver_log = join(test_dir, 'receiver')
+    writeFileSync(receiver_log, '')
+    const child = spawn(process.execPath, [source, 'Password: '], {
+      env: {
+        ...process.env,
+        PATH: `${bin_dir}:${process.env.PATH}`,
+        TMPDIR: prompt_tmp,
+        HERDR_ENV: '1',
+        SIDO_E2E_MODE: 'orphan',
+        SIDO_E2E_PANE_LOG: pane_log,
+        SIDO_E2E_RECEIVER_LOG: receiver_log,
+      },
+      stdio: 'ignore',
+    })
+
+    await wait_for(() => readFileSync(receiver_log, 'utf8').trim() !== '')
+    const receiver_pid = Number(readFileSync(receiver_log, 'utf8').trim())
+    child.kill('SIGKILL')
+    await new Promise<void>((resolve) => child.once('exit', () => resolve()))
+
+    await wait_for(
+      () =>
+        readFileSync(pane_log, 'utf8') === 'fake-pane\n' &&
+        readdirSync(prompt_tmp).length === 0 &&
+        !process_exists(receiver_pid),
+    )
+    assert.equal(process_exists(receiver_pid), false)
     assert.equal(readFileSync(pane_log, 'utf8'), 'fake-pane\n')
     assert_clean()
   })

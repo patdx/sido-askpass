@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 
+if [ "$1" = '_inner_prompt_receiver' ]; then
+  printf '%s\n' "$$" > "$SIDO_E2E_RECEIVER_LOG"
+  while true; do sleep 1; done
+fi
+
 case "$1 $2" in
   'pane layout')
     printf '%s\n' '{"result":{"pane":{"width":200}}}'
@@ -14,9 +19,16 @@ case "$1 $2" in
     if [ "${SIDO_E2E_MODE:-}" = 'fail' ]; then
       exit 42
     fi
-    printf '%s\n' 'fake-password' > "$7"
+    if [ "${SIDO_E2E_MODE:-}" = 'orphan' ]; then
+      exec bash -c "$6" sido \
+        "$0" "${9}" "${10}" "${11}" "${12}" "${13}"
+    fi
+    printf '%s\n' 'fake-password' > "${10}"
     ;;
   'pane close')
     printf '%s\n' "$3" >> "$SIDO_E2E_PANE_LOG"
+    if [ "${SIDO_E2E_MODE:-}" = 'orphan' ]; then
+      kill "$(cat "$SIDO_E2E_RECEIVER_LOG")" 2>/dev/null
+    fi
     ;;
 esac
