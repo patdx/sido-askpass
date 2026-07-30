@@ -47,7 +47,9 @@ User setup selects the startup file from `$SHELL`: `~/.zshrc` for zsh,
 `~/.bashrc` for Bash, and `~/.profile` for other shells. The managed entry is
 appended after existing shell setup so tools such as fnm are initialized first.
 Existing sido-managed entries in other supported startup files are migrated to
-the selected file. Unmanaged `SUDO_ASKPASS` entries are preserved.
+the selected file. For zsh, the managed block also adds
+`alias sudo='sudo -A'`, making askpass the default for interactive commands.
+Unmanaged `SUDO_ASKPASS` entries are preserved.
 
 Restart the shell after installation, or activate the current session with the
 exact `export SUDO_ASKPASS=...` command printed by the installer.
@@ -117,16 +119,17 @@ TTY allocation is the important distinction:
   fallback cannot be assumed even when the agent UI has no visible terminal.
 - `sudo -A` requests askpass regardless of whether a TTY exists.
 
-For interactive shells, an optional alias can make askpass the default:
+The zsh user installer adds this alias to its managed block, making askpass the
+default for interactive commands:
 
 ```bash
 alias sudo='sudo -A'
 ```
 
 Shell aliases usually do not affect commands launched directly by coding
-agents or other non-interactive processes. `sido-askpass` may automate this in
-the future, but it currently does not install an alias, rewrite sudo commands,
-or add `-A`.
+agents or other non-interactive processes. Bash and other shell installations
+do not add the alias. `sido-askpass` does not rewrite sudo commands or add `-A`
+outside the zsh alias.
 
 ## Codex test matrix
 

@@ -371,20 +371,21 @@ function user_profile_path(): string {
   return join(homedir(), '.profile')
 }
 
-function managed_user_pattern(): RegExp {
-  return /^# sido\nexport SUDO_ASKPASS=.*$\n?/gm
+function managed_user_block_pattern(): RegExp {
+  return /^# sido start\n[\s\S]*?^# sido end\n?/m
 }
 
 function managed_user_install(path: string): string | undefined {
   if (!existsSync(path)) return
-  return readFileSync(path, 'utf8').match(
-    /^# sido\nexport SUDO_ASKPASS=(.*)$/m,
-  )?.[1]
+  const block = readFileSync(path, 'utf8').match(
+    managed_user_block_pattern(),
+  )?.[0]
+  return block?.match(/^export SUDO_ASKPASS=(.*)$/m)?.[1]
 }
 
 function remove_managed_user_install(content: string): string {
   return content
-    .replace(managed_user_pattern(), '')
+    .replace(managed_user_block_pattern(), '')
     .replace(/\n{3,}/g, '\n\n')
     .trimEnd()
 }
@@ -640,12 +641,15 @@ function do_install(scope?: string): void {
 function install_user(): void {
   const target_path = user_profile_path()
   const line = `export SUDO_ASKPASS="${askpass_path}"`
+  const alias_line =
+    basename(target_path) === '.zshrc' ? "\nalias sudo='sudo -A'" : ''
+  const managed_block = `# sido start\n${line}${alias_line}\n# sido end\n`
   const migrated_paths: string[] = []
 
   for (const path of user_profile_paths()) {
     if (!existsSync(path)) continue
     const content = readFileSync(path, 'utf8')
-    if (!managed_user_pattern().test(content)) continue
+    if (!managed_user_block_pattern().test(content)) continue
     if (path !== target_path) {
       writeFileSync(path, `${remove_managed_user_install(content)}\n`)
       migrated_paths.push(path)
@@ -653,15 +657,29 @@ function install_user(): void {
   }
 
   const target_content = existsSync(target_path)
-    ? remove_managed_user_install(readFileSync(target_path, 'utf8'))
+    ? readFileSync(target_path, 'utf8')
     : ''
-  for (const match of target_content.matchAll(/^export SUDO_ASKPASS=(.*)$/gm)) {
+  const unmanaged_content = remove_managed_user_install(target_content)
+  for (const match of unmanaged_content.matchAll(
+    /^export SUDO_ASKPASS=(.*)$/gm,
+  )) {
     console.error(
       `[sido] warning: preserving unmanaged SUDO_ASKPASS=${match[1]} in ${target_path}`,
     )
   }
-  const separator = target_content ? '\n\n' : ''
-  writeFileSync(target_path, `${target_content}${separator}# sido\n${line}\n`)
+  if (managed_user_block_pattern().test(target_content)) {
+    writeFileSync(
+      target_path,
+      target_content.replace(managed_user_block_pattern(), managed_block),
+    )
+  } else {
+    const normalized_content = target_content.trimEnd()
+    const separator = normalized_content ? '\n\n' : ''
+    writeFileSync(
+      target_path,
+      `${normalized_content}${separator}${managed_block}`,
+    )
+  }
 
   for (const path of migrated_paths) {
     console.error(`[sido] migrated user configuration from ${path}`)
@@ -719,11 +737,11 @@ function do_uninstall(scope: string): void {
     for (const path of user_profile_paths()) {
       if (!existsSync(path)) continue
       const content = readFileSync(path, 'utf8')
-      if (!managed_user_pattern().test(content)) continue
+      if (!managed_user_block_pattern().test(content)) continue
       writeFileSync(
         path,
         normalize_uninstalled_content(
-          content.replace(managed_user_pattern(), ''),
+          content.replace(managed_user_block_pattern(), ''),
         ),
       )
       removed_paths.push(path)

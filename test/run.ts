@@ -260,7 +260,7 @@ describe('e2e', { concurrency: 1 }, (): void => {
     assert.match(install.stderr, /warning: preserving unmanaged SUDO_ASKPASS=/)
     assert.match(
       readFileSync(profile, 'utf8'),
-      /^# sido\nexport SUDO_ASKPASS=/m,
+      /^# sido start\nexport SUDO_ASKPASS=.*\n# sido end$/m,
     )
 
     const reinstall = run({
@@ -268,7 +268,10 @@ describe('e2e', { concurrency: 1 }, (): void => {
       env: { HOME: home },
     })
     assert.equal(reinstall.status, 0, reinstall.stderr)
-    assert.equal(readFileSync(profile, 'utf8').match(/^# sido$/gm)?.length, 1)
+    assert.equal(
+      readFileSync(profile, 'utf8'),
+      `export KEEP_ME=yes\nexport SUDO_ASKPASS="/opt/other-askpass"\n\n# sido start\nexport SUDO_ASKPASS="${askpass}"\n# sido end\n`,
+    )
 
     const uninstall = run({
       args: ['uninstall', '--user'],
@@ -288,7 +291,7 @@ describe('e2e', { concurrency: 1 }, (): void => {
     mkdirSync(home)
     writeFileSync(
       profile,
-      'export KEEP_PROFILE=yes\n\n# sido\nexport SUDO_ASKPASS="/old/path"\n',
+      'export KEEP_PROFILE=yes\n\n# sido start\nexport SUDO_ASKPASS="/old/path"\n# sido end\n',
     )
     writeFileSync(zshrc, 'eval "$(fnm env)"\nexport KEEP_ZSH=yes\n')
 
@@ -300,11 +303,21 @@ describe('e2e', { concurrency: 1 }, (): void => {
     assert.equal(readFileSync(profile, 'utf8'), 'export KEEP_PROFILE=yes\n')
     assert.equal(
       readFileSync(zshrc, 'utf8'),
-      `eval "$(fnm env)"\nexport KEEP_ZSH=yes\n\n# sido\nexport SUDO_ASKPASS="${askpass}"\n`,
+      `eval "$(fnm env)"\nexport KEEP_ZSH=yes\n\n# sido start\nexport SUDO_ASKPASS="${askpass}"\nalias sudo='sudo -A'\n# sido end\n`,
     )
     assert.match(install.stderr, /migrated user configuration from .*\.profile/)
     assert.match(install.stderr, /restart your shell/)
     assert.doesNotMatch(install.stderr, /source /)
+
+    const reinstall = run({
+      args: ['install', '--user'],
+      env: { HOME: home, SHELL: '/bin/zsh' },
+    })
+    assert.equal(reinstall.status, 0, reinstall.stderr)
+    assert.equal(
+      readFileSync(zshrc, 'utf8').match(/^alias sudo='sudo -A'$/gm)?.length,
+      1,
+    )
   })
 
   test('user status and uninstall scan every supported startup file', () => {
@@ -312,11 +325,11 @@ describe('e2e', { concurrency: 1 }, (): void => {
     mkdirSync(home)
     writeFileSync(
       join(home, '.profile'),
-      '# sido\nexport SUDO_ASKPASS="/profile/path"\n',
+      '# sido start\nexport SUDO_ASKPASS="/profile/path"\n# sido end\n',
     )
     writeFileSync(
       join(home, '.zshrc'),
-      '# sido\nexport SUDO_ASKPASS="/zsh/path"\n',
+      '# sido start\nexport SUDO_ASKPASS="/zsh/path"\nalias sudo=\'sudo -A\'\n# sido end\n',
     )
 
     const status = run({
@@ -332,8 +345,14 @@ describe('e2e', { concurrency: 1 }, (): void => {
       env: { HOME: home, SHELL: '/bin/zsh' },
     })
     assert.equal(uninstall.status, 0, uninstall.stderr)
-    assert.doesNotMatch(readFileSync(join(home, '.profile'), 'utf8'), /# sido/)
-    assert.doesNotMatch(readFileSync(join(home, '.zshrc'), 'utf8'), /# sido/)
+    assert.doesNotMatch(
+      readFileSync(join(home, '.profile'), 'utf8'),
+      /# sido (?:start|end)/,
+    )
+    assert.doesNotMatch(
+      readFileSync(join(home, '.zshrc'), 'utf8'),
+      /# sido (?:start|end)/,
+    )
     assert.match(uninstall.stderr, /\.profile/)
     assert.match(uninstall.stderr, /\.zshrc/)
   })
@@ -342,13 +361,16 @@ describe('e2e', { concurrency: 1 }, (): void => {
     const home = join(test_dir, 'home-install-detect')
     const profile = join(home, '.profile')
     mkdirSync(home)
-    writeFileSync(profile, '# sido\nexport SUDO_ASKPASS="/old/sido-askpass"\n')
+    writeFileSync(
+      profile,
+      'export BEFORE=yes\n\n# sido start\nexport SUDO_ASKPASS="/old/sido-askpass"\n# sido end\n\nexport AFTER=yes\n',
+    )
 
     const result = run({ args: ['install'], env: { HOME: home } })
     assert.equal(result.status, 0, result.stderr)
     assert.equal(
       readFileSync(profile, 'utf8'),
-      `# sido\nexport SUDO_ASKPASS="${askpass}"\n`,
+      `export BEFORE=yes\n\n# sido start\nexport SUDO_ASKPASS="${askpass}"\n# sido end\n\nexport AFTER=yes\n`,
     )
   })
 
@@ -438,7 +460,7 @@ describe('e2e', { concurrency: 1 }, (): void => {
     )
     assert.match(
       readFileSync(join(home, '.profile'), 'utf8'),
-      /^# sido\nexport SUDO_ASKPASS=/m,
+      /^# sido start\nexport SUDO_ASKPASS=/m,
     )
     assert.match(result.stderr, /refreshing managed configuration/)
   })
