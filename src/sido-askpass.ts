@@ -6,9 +6,12 @@
 import { spawnSync } from 'node:child_process'
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs'
 import { tmpdir, userInfo, hostname, homedir } from 'node:os'
@@ -43,8 +46,14 @@ Usage:
   sido-askpass uninstall --user|--system
   sido-askpass status [--user|--system]
   sido-askpass run <command> [args...]  run <command> with SUDO_ASKPASS set
+  sido-askpass watch                     wait for and approve pending requests
+  sido-askpass approve                   approve the most recent pending request
   sido-askpass --help
-  sido-askpass --version`)
+  sido-askpass --version
+
+Env:
+  SIDO_WATCH=1             force watch mode (skip inline TTY read)
+  SIDO_WATCH_TIMEOUT=<sec> approver wait timeout (default 120)`)
   process.exit(0)
 }
 
@@ -98,6 +107,16 @@ if (command === 'run') {
   do_run(process.argv[3], process.argv.slice(4))
 }
 
+if (command === 'watch') {
+  do_watch()
+  process.exit(0)
+}
+
+if (command === 'approve') {
+  do_approve()
+  process.exit(0)
+}
+
 // ── askpass mode ───────────────────────────────────────────────────────────
 
 const prompt = (command || `[sudo] password for ${userInfo().username}: `)
@@ -121,8 +140,8 @@ interface PromptResources {
   prompt_file: string
 }
 
-function create_prompt_resources(): PromptResources {
-  const dir = mkdtempSync(join(tmpdir(), 'sido-'))
+function create_prompt_resources(base: string = tmpdir()): PromptResources {
+  const dir = mkdtempSync(join(base, 'sido-'))
   const fifo = join(dir, 'password')
   const result = spawnSync('mkfifo', ['-m', '600', fifo], {
     stdio: ['pipe', 'pipe', 'pipe'],
@@ -161,7 +180,7 @@ function read_stdout(r: {
   return r.stdout.toString().replace(/\r?\n$/, '')
 }
 
-function read_secret(prompt: string): string {
+function read_secret(prompt: string): string | null {
   const r = spawnSync(
     'bash',
     [
@@ -172,12 +191,15 @@ function read_secret(prompt: string): string {
     ],
     { stdio: ['ignore', 'pipe', 'inherit'] },
   )
-  return read_stdout(r)
+  if (r.status !== 0 || !r.stdout || r.stdout.length === 0) return null
+  return r.stdout.toString().replace(/\r?\n$/, '')
 }
 
 function inner_prompt_receiver(prompt_file: string, fifo: string): void {
   const prompt = readFileSync(prompt_file, 'utf8')
-  writeFileSync(fifo, `${read_secret(prompt)}\n`)
+  const pw = read_secret(prompt)
+  if (pw == null) process.exit(1)
+  writeFileSync(fifo, `${pw}\n`)
 }
 
 function get_requesting_command(): string | undefined {
@@ -212,7 +234,25 @@ function main(): void {
   if (is_tmux) return void tmux_prompt()
   if (is_herdr) return void herdr_prompt()
   if (can_gui) return void gui_prompt()
-  tty_prompt()
+  if (process.env.SIDO_WATCH !== '1' && interactive_shell_tty() && tty_prompt())
+    return
+  watch_prompt()
+}
+
+// Returns true when /dev/tty is our controlling terminal and it is in canonical
+// mode (a normal interactive shell owns it) — i.e. safe to read a password
+// inline. A raw-mode tty means a TUI/agent owns the screen, and no tty at all
+// means headless; both fall through to watch mode. `stty -a` is read-only, so
+// it never disturbs the owning application's terminal state.
+function interactive_shell_tty(): boolean {
+  const r = spawnSync('bash', ['-c', 'stty -a < /dev/tty 2>/dev/null'], {
+    stdio: ['ignore', 'pipe', 'inherit'],
+  })
+  if (r.status !== 0) return false
+  const out = r.stdout?.toString() ?? ''
+  // Linux prints `icanon`/`echo`; BSD/macOS prints `canon`/`echo`. Negated
+  // flags are prefixed with `-`, which the lookbehind excludes.
+  return /(?<!-)(?:i?canon)\b/.test(out) && /(?<!-)echo\b/.test(out)
 }
 
 function sudo_conf_path(): string {
@@ -514,7 +554,8 @@ function herdr_prompt(): void {
 function fallback_herdr(): void {
   console.error('[sido] herdr pane split failed, falling back')
   if (can_gui) return void gui_prompt()
-  tty_prompt()
+  if (tty_prompt()) return
+  process.exit(1)
 }
 
 // ── GUI (macOS / Linux) ────────────────────────────────────────────────────
@@ -562,8 +603,142 @@ function linux_gui(): void {
 
 // ── TTY fallback ───────────────────────────────────────────────────────────
 
-function tty_prompt(): void {
-  process.stdout.write(read_secret(display_prompt))
+function tty_prompt(): boolean {
+  const pw = read_secret(display_prompt)
+  if (pw == null) return false
+  process.stdout.write(pw)
+  return true
+}
+
+// ── Watch mode (fallback for raw/headless ttys) ────────────────────────────
+//
+// When no inline surface is safe (a TUI/agent owns the tty in raw mode, or
+// there is no tty at all), park the request in a user-private dir and block on
+// a FIFO. A second terminal runs `sido approve` / `sido watch` to supply the
+// password, which is written through the FIFO — never to disk, never to the
+// agent transcript. This is agent-agnostic: it works for opencode, Codex, Pi,
+// plain SSH, and headless scripts alike.
+
+function sido_dir(): string {
+  const base = process.env.XDG_RUNTIME_DIR || join(homedir(), '.cache')
+  const dir = join(base, 'sido')
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 })
+  return dir
+}
+
+function watch_timeout_ms(): number {
+  const raw = Number(process.env.SIDO_WATCH_TIMEOUT)
+  if (Number.isFinite(raw) && raw > 0) return raw * 1000
+  return 120_000
+}
+
+function watch_prompt(): void {
+  let resources: PromptResources
+  try {
+    resources = create_prompt_resources(sido_dir())
+  } catch (error) {
+    console.error(`[sido] ${String(error)}`)
+    process.exit(1)
+  }
+
+  const timeout_ms = watch_timeout_ms()
+  console.error(
+    `[sido] password requested${requesting_command ? ` for: ${requesting_command}` : ''}`,
+  )
+  console.error(
+    `[sido] from another terminal run: ${self_path} approve  (waiting up to ${Math.round(timeout_ms / 1000)}s)`,
+  )
+
+  // External `cat` opens the FIFO read-only and blocks until a writer (the
+  // approver) connects. spawnSync's timeout kills it if nobody approves in time
+  // — avoiding libuv's uncancellable threadpool open() on a FIFO.
+  let r
+  try {
+    r = spawnSync('bash', ['-c', 'cat "$1"', 'sido', resources.fifo], {
+      stdio: ['ignore', 'pipe', 'inherit'],
+      timeout: timeout_ms,
+      killSignal: 'SIGTERM',
+    })
+  } finally {
+    remove_prompt_resources(resources)
+  }
+
+  if (r!.signal === 'SIGTERM' || r!.status === null) {
+    console.error('[sido] timed out waiting for approver')
+    process.exit(1)
+  }
+  process.stdout.write(read_stdout(r!))
+}
+
+function do_watch(): void {
+  console.error(
+    `[sido] watching ${sido_dir()} for password requests (Ctrl-C to exit)`,
+  )
+  while (true) {
+    const req = newest_request()
+    if (req) handle_request(req)
+    else spawnSync('sleep', ['1'], { stdio: ['ignore', 'ignore', 'inherit'] })
+  }
+}
+
+function do_approve(): void {
+  const req = newest_request()
+  if (!req) {
+    console.error('[sido] no pending password requests')
+    process.exit(0)
+  }
+  handle_request(req)
+}
+
+function newest_request(): string | undefined {
+  let entries: string[]
+  try {
+    entries = readdirSync(sido_dir())
+  } catch {
+    return undefined
+  }
+  let newest: string | undefined
+  let newest_mtime = -Infinity
+  for (const entry of entries) {
+    if (!entry.startsWith('sido-')) continue
+    const path = join(sido_dir(), entry)
+    const m = statSync(path).mtimeMs
+    if (m > newest_mtime) {
+      newest_mtime = m
+      newest = path
+    }
+  }
+  return newest
+}
+
+function handle_request(req_dir: string): void {
+  let prompt = '[sudo] password: '
+  try {
+    prompt = readFileSync(join(req_dir, 'prompt'), 'utf8')
+  } catch {}
+
+  const password = read_secret(prompt)
+  if (password == null) {
+    console.error('[sido] no password entered')
+    process.exit(1)
+  }
+
+  // Feed the password via stdin, not argv, so it never appears in `ps`. The
+  // redirection opens the FIFO write-only and blocks until the waiting shim's
+  // reader connects; the timeout covers a shim that already exited/timed out.
+  const r = spawnSync(
+    'bash',
+    ['-c', 'cat > "$1"', 'sido', join(req_dir, 'password')],
+    {
+      input: `${password}\n`,
+      stdio: ['pipe', 'pipe', 'inherit'],
+      timeout: 5_000,
+    },
+  )
+  console.error(
+    r.status === 0 ? '[sido] password sent' : '[sido] request expired',
+  )
+  rmSync(req_dir, { recursive: true, force: true })
 }
 
 main()

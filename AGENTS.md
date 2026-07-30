@@ -20,13 +20,14 @@ sudo -A <command>          # or plain sudo on modern Fedora (auto-falls back whe
 
 ## Detection chain
 
-| Context            | Method                                                     |
-| ------------------ | ---------------------------------------------------------- |
-| `$TMUX` set        | `tmux display-popup` + Bash `read -s`, FIFO back to parent |
-| `$HERDR_ENV=1`     | `herdr pane split` + `pane run` **bash read**, FIFO back   |
-| macOS + GUI        | `osascript` hidden dialog                                  |
-| Linux + `$DISPLAY` | `zenity` → `kdialog`                                       |
-| else               | `read -s` on `/dev/tty`                                    |
+| Context              | Method                                                           |
+| -------------------- | ---------------------------------------------------------------- |
+| `$TMUX` set          | `tmux display-popup` + Bash `read -s`, FIFO back to parent       |
+| `$HERDR_ENV=1`       | `herdr pane split` + `pane run` **bash read**, FIFO back         |
+| macOS + GUI          | `osascript` hidden dialog                                        |
+| Linux + `$DISPLAY`   | `zenity` → `kdialog`                                             |
+| canonical `/dev/tty` | `read -s` on `/dev/tty` (interactive shell; detected via `stty`) |
+| else                 | **watch mode**: park request + FIFO, `sido approve` supplies     |
 
 ## Install / uninstall / status
 
@@ -40,9 +41,32 @@ sudo -A <command>          # or plain sudo on modern Fedora (auto-falls back whe
 
 `--user` and `--system` are mutually exclusive (enforced via `parseArgs`).
 
+## Watch mode (agent-agnostic fallback)
+
+When no inline surface is safe — a TUI/agent owns the tty in raw mode (detected
+via `stty -a`: canonical+echo = interactive shell; otherwise watch), or there is
+no tty at all — the shim parks the request and blocks on a FIFO instead of
+failing. Supply the password from any second terminal:
+
+```bash
+sido-askpass approve   # approve the most recent pending request (one-shot)
+sido-askpass watch     # long-lived: approve requests as they arrive (Ctrl-C to exit)
+```
+
+The original terminal is hinted to run `<self> approve`. Requests live under
+`$XDG_RUNTIME_DIR/sido` (or `~/.cache/sido`), mode 0700; each request is a
+`sido-*` dir holding the prompt and a mode-0600 `password` FIFO.
+
+- `SIDO_WATCH=1` — force watch mode, skipping the inline TTY read.
+- `SIDO_WATCH_TIMEOUT=<sec>` — how long the shim waits for an approver before
+  giving up (default 120). On timeout sudo fails rather than hanging forever.
+
+This is the recommended path for `ssh` → coding agent → `sudo` without tmux/Herdr,
+and the only viable path for Codex (whose TUI cannot render a password prompt).
+
 ## Security
 
-Passwords never touch disk — tmux and Herdr use FIFOs (kernel memory). TTY fallback pipes stdout directly.
+Passwords never touch disk — tmux, Herdr, and watch mode all use FIFOs (kernel memory). TTY fallback pipes stdout directly. Watch's approver feeds the password via stdin (`cat > fifo`), never argv, so it never appears in `ps`.
 
 ## Developer commands
 
@@ -60,4 +84,6 @@ pnpm test                   # fake tmux/Herdr commands + real FIFOs (Linux)
 - `scripts/build.ts` strips types with Amaro and writes the executable `dist/sido-askpass.js`; there is no bundle.
 - Code style: `snake_case` for all local functions and variables, no semicolons, single quotes, `verbatimModuleSyntax` (type imports must use `import type`).
 - tmux and Herdr prompt functions use embedded bash scripts (`spawnSync('bash', ['-c', ...])`) with shell job control (`&`, `wait`) instead of native `fs` on FIFOs — this is intentional: libuv threadpool `open()` on a FIFO cannot be cancelled from JS, while the shell naturally reaps the background `cat` on cancel. The shared FIFO-drain + reap-on-cancel skeleton is built by `fifo_drain_script()`.
-- In askpass mode (`argv[2]` is not `install`/`uninstall`/`status`), the first positional argument is the sudo prompt — not parsed by `parseArgs`.
+- In askpass mode (`argv[2]` is not `install`/`uninstall`/`status`/`watch`/`approve`/`run`), the first positional argument is the sudo prompt — not parsed by `parseArgs`.
+- Watch mode is the final fallback when there's no usable inline surface. The tty-vs-watch decision uses a **termios heuristic**: `stty -a < /dev/tty` is parsed for `icanon`+`echo` (canonical → interactive shell → inline `read -s`); a raw-mode tty (a TUI/agent owns the screen) or no tty at all → watch. `stty -a` is read-only and never alters the owning app's terminal state. `SIDO_WATCH=1` forces watch and bypasses the check.
+- Watch parks each request under `$XDG_RUNTIME_DIR/sido` (or `~/.cache/sido`) as a `sido-*` dir (mode 0700) with a mode-0600 `password` FIFO. The shim blocks on a child `cat` of the FIFO with a `spawnSync` timeout (`SIDO_WATCH_TIMEOUT`, default 120s) — killable, unlike a libuv FIFO `open()`. The approver (`approve`/`watch`) writes the password via stdin (`cat > fifo`), never argv.

@@ -18,10 +18,12 @@ Works with:
 - **Codex Full Access** — sudo authentication from agent-run commands
 - **tmux** — hidden popup prompt without stealing the agent's TTY
 - **Herdr** — temporary password prompt pane that closes automatically
-- **Raw terminals** — `/dev/tty` fallback when no GUI or multiplexer is available
+- **Raw terminals** — `/dev/tty` fallback when an interactive shell owns the TTY
+- **Watch mode** — approve from a second terminal when a TUI/agent owns the TTY (e.g. `ssh` → coding agent → `sudo` with no tmux/Herdr)
 
 Supports Linux and macOS. Requires **Node.js 24+**. Bash is required for the
-tmux, Herdr, and `/dev/tty` backends; tmux and Herdr also require `mkfifo`.
+tmux, Herdr, `/dev/tty`, and watch backends; tmux, Herdr, and watch also require
+`mkfifo`.
 Linux GUI prompting requires either `zenity` or `kdialog`. Windows is not
 supported.
 
@@ -147,13 +149,31 @@ The first matching context is used:
 | `$HERDR_ENV=1`               | Temporary Herdr pane with `read -s`; FIFO return | Tested on Linux         |
 | macOS                        | Hidden `osascript` dialog                        | Implemented, unverified |
 | Linux + `$DISPLAY` / Wayland | `zenity`, then `kdialog`                         | Tested on Linux         |
-| Other environment            | Hidden `read -s` prompt on `/dev/tty`            | Fallback                |
+| Canonical `/dev/tty`         | Hidden `read -s` prompt on `/dev/tty`            | Fallback                |
+| Raw/no TTY                   | Watch mode: park request + FIFO, `approve`       | New                     |
 
 The prompt also shows the requesting command when the parent process command
 line is available. If process inspection is blocked, it silently shows the
 normal password prompt without the command. The displayed command includes its
 arguments, which may reveal sensitive arguments to anyone who can see the
 prompt.
+
+## Watch mode
+
+When no inline prompt is safe — a coding agent's TUI owns the TTY in raw mode,
+or there is no TTY at all — `sido-askpass` parks the request and waits for a
+password from a second terminal:
+
+```bash
+sido-askpass approve   # approve the most recent pending request (one-shot)
+sido-askpass watch     # approve requests as they arrive (Ctrl-C to exit)
+```
+
+The original terminal prints a hint telling you which command to run. Requests
+live under `$XDG_RUNTIME_DIR/sido` (or `~/.cache/sido`); the password travels
+through a kernel FIFO, never a file. `SIDO_WATCH=1` forces watch mode;
+`SIDO_WATCH_TIMEOUT=<sec>` sets how long the shim waits before giving up
+(default 120).
 
 ## Status and removal
 
@@ -177,9 +197,11 @@ status. Omitting both is supported only by status.
 
 ## Security
 
-Password input is hidden. tmux and Herdr return the password through a kernel
-FIFO; GUI and TTY backends return it through process stdout. Each tmux or Herdr
-prompt uses a private temporary directory. Its FIFO, prompt, and helper script
+Password input is hidden. tmux, Herdr, and watch mode return the password
+through a kernel FIFO; GUI and TTY backends return it through process stdout.
+Each tmux, Herdr, or watch prompt uses a private directory (mode 0700 under
+`$XDG_RUNTIME_DIR/sido` for watch) with a mode-0600 FIFO. Its FIFO and prompt
 are accessible only to the current user and are removed when prompting ends.
-The temporary prompt file contains the displayed command and prompt, but never
-the password.
+Watch's approver feeds the password via stdin (`cat > fifo`), never argv, so it
+never appears in `ps`. The prompt file contains the displayed command and
+prompt, but never the password.

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { after, before, describe, test } from 'node:test'
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import {
   chmodSync,
   copyFileSync,
@@ -215,5 +215,83 @@ describe('e2e', { concurrency: 1 }, (): void => {
     const result = run({ args: ['status', '--user'], env: { HOME: home } })
     assert.equal(result.status, 0, result.stderr)
     assert.match(result.stderr, /user askpass in/)
+  })
+
+  test('watch times out and hints when no approver connects', () => {
+    const runtime = join(test_dir, 'runtime-timeout')
+    mkdirSync(runtime, { recursive: true })
+    const result = run({
+      args: ['Password: '],
+      env: {
+        XDG_RUNTIME_DIR: runtime,
+        SIDO_WATCH: '1',
+        SIDO_WATCH_TIMEOUT: '1',
+      },
+    })
+    assert.equal(result.status, 1, result.stdout)
+    assert.match(result.stderr, /from another terminal run: .* approve/)
+    assert.match(result.stderr, /timed out waiting for approver/)
+    assert.deepEqual(readdirSync(join(runtime, 'sido')), [])
+  })
+
+  test('watch hands the password through the FIFO to an approver', async () => {
+    const runtime = join(test_dir, 'runtime-watch')
+    mkdirSync(runtime, { recursive: true })
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      PATH: `${bin_dir}:${process.env.PATH}`,
+      XDG_RUNTIME_DIR: runtime,
+      SIDO_WATCH: '1',
+      SIDO_WATCH_TIMEOUT: '10',
+    }
+    delete env.TMUX
+    delete env.HERDR_ENV
+    delete env.DISPLAY
+    delete env.WAYLAND_DISPLAY
+    const child = spawn(process.execPath, [source, 'Password: '], {
+      env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    let stdout = ''
+    let stderr = ''
+    child.stdout.on('data', (d: Buffer) => (stdout += d.toString()))
+    child.stderr.on('data', (d: Buffer) => (stderr += d.toString()))
+
+    let fifo: string | undefined
+    for (let i = 0; i < 100; i++) {
+      try {
+        const entries = readdirSync(join(runtime, 'sido')).filter((e) =>
+          e.startsWith('sido-'),
+        )
+        if (entries.length > 0) {
+          fifo = join(runtime, 'sido', entries[0]!, 'password')
+          break
+        }
+      } catch {}
+      await new Promise((r) => setTimeout(r, 50))
+    }
+    assert.ok(fifo, 'request FIFO appeared')
+
+    const w = spawnSync('bash', ['-c', 'cat > "$1"', 'sido', fifo], {
+      input: 'e2e-secret\n',
+      encoding: 'utf8',
+      timeout: 3_000,
+    })
+    assert.equal(w.status, 0, w.stderr)
+
+    const code = await new Promise<number>((resolve) =>
+      child.on('close', resolve),
+    )
+    assert.equal(code, 0, `child exited ${code}: ${stderr}`)
+    assert.equal(stdout, 'e2e-secret')
+    assert.deepEqual(readdirSync(join(runtime, 'sido')), [])
+  })
+
+  test('approve reports nothing when no requests are pending', () => {
+    const runtime = join(test_dir, 'runtime-empty')
+    mkdirSync(runtime, { recursive: true })
+    const result = run({ args: ['approve'], env: { XDG_RUNTIME_DIR: runtime } })
+    assert.equal(result.status, 0, result.stderr)
+    assert.match(result.stderr, /no pending password requests/)
   })
 })
