@@ -50,7 +50,7 @@ Passwords never touch disk — tmux and Herdr use FIFOs (kernel memory). TTY fal
 pnpm typecheck             # tsc (noEmit is in tsconfig)
 pnpm format                # prettier --write .
 pnpm format:check          # prettier --check .
-pnpm e2e                   # fake tmux/Herdr commands + real FIFOs (Linux)
+pnpm test                   # fake tmux/Herdr commands + real FIFOs (Linux)
 ```
 
 ## Key details agents miss

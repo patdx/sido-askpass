@@ -1,6 +1,6 @@
 {
   "name": "sido-askpass",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "SUDO_ASKPASS shim for headless agent environments (tmux, Herdr, GUI, TTY)",
   "license": "MIT",
   "type": "module",
@@ -34,14 +34,13 @@
   "scripts": {
     "build": "node scripts/build.ts",
     "prepare": "node scripts/build.ts",
-    "e2e": "node e2e/run.ts",
+    "test": "node --test test/run.ts",
     "prepublishOnly": "pnpm typecheck && pnpm build",
     "typecheck": "tsc",
-    "format": "prettier --write .",
-    "format:check": "prettier --check ."
+    "format": "prettier --write ."
   },
   "devDependencies": {
-    "@types/node": "^24.0.0",
+    "@types/node": "^24.13.3",
     "amaro": "^1.1.11",
     "prettier": "^3.9.6",
     "typescript": "^7.0.2"

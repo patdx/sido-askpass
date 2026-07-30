@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { after, before, describe, test } from 'node:test'
 import { spawnSync } from 'node:child_process'
 import {
   chmodSync,
@@ -17,20 +18,13 @@ import package_json from '../package.json' with { type: 'json' }
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const source = join(root, 'src', 'sido-askpass.ts')
-const fixture_dir = join(root, 'e2e', 'fixtures')
-const test_dir = mkdtempSync(join(tmpdir(), 'sido-e2e-'))
-const bin_dir = join(test_dir, 'bin')
-const prompt_tmp = join(test_dir, 'prompt-tmp')
-const mode_log = join(test_dir, 'modes')
-const pane_log = join(test_dir, 'panes')
+const fixture_dir = join(root, 'test', 'fixtures')
 
-mkdirSync(bin_dir)
-mkdirSync(prompt_tmp)
-for (const command of ['tmux', 'herdr']) {
-  const target = join(bin_dir, command)
-  copyFileSync(join(fixture_dir, command), target)
-  chmodSync(target, 0o755)
-}
+let test_dir: string
+let bin_dir: string
+let prompt_tmp: string
+let mode_log: string
+let pane_log: string
 
 interface RunOptions {
   args?: string[]
@@ -61,12 +55,26 @@ function assert_clean(): void {
   assert.deepEqual(readdirSync(prompt_tmp), [])
 }
 
-function test(name: string, fn: () => void): void {
-  fn()
-  console.log(`✓ ${name}`)
-}
+describe('e2e', { concurrency: 1 }, (): void => {
+  before(() => {
+    test_dir = mkdtempSync(join(tmpdir(), 'sido-e2e-'))
+    bin_dir = join(test_dir, 'bin')
+    prompt_tmp = join(test_dir, 'prompt-tmp')
+    mode_log = join(test_dir, 'modes')
+    pane_log = join(test_dir, 'panes')
+    mkdirSync(bin_dir)
+    mkdirSync(prompt_tmp)
+    for (const command of ['tmux', 'herdr']) {
+      const target = join(bin_dir, command)
+      copyFileSync(join(fixture_dir, command), target)
+      chmodSync(target, 0o755)
+    }
+  })
 
-try {
+  after(() => {
+    rmSync(test_dir, { recursive: true, force: true })
+  })
+
   test('tmux returns the password with private prompt artifacts', () => {
     const result = run({
       env: {
@@ -208,6 +216,4 @@ try {
     assert.equal(result.status, 0, result.stderr)
     assert.match(result.stderr, /user askpass in/)
   })
-} finally {
-  rmSync(test_dir, { recursive: true, force: true })
-}
+})
