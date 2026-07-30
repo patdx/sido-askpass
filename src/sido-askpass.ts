@@ -203,16 +203,17 @@ function remove_prompt_resources(resources: PromptResources): void {
   rmSync(resources.dir, { recursive: true, force: true })
 }
 
-function read_stdout(r: {
+function read_stdout(result: {
   status: number | null
   stdout: Buffer | null
 }): string {
-  if (r.status !== 0 || !r.stdout || r.stdout.length === 0) process.exit(1)
-  return r.stdout.toString().replace(/\r?\n$/, '')
+  if (result.status !== 0 || !result.stdout || result.stdout.length === 0)
+    process.exit(1)
+  return result.stdout.toString().replace(/\r?\n$/, '')
 }
 
 function read_secret(prompt: string): string | null {
-  const r = spawnSync(
+  const result = spawnSync(
     'bash',
     [
       '-c',
@@ -222,8 +223,9 @@ function read_secret(prompt: string): string | null {
     ],
     { stdio: ['ignore', 'pipe', 'inherit'] },
   )
-  if (r.status !== 0 || !r.stdout || r.stdout.length === 0) return null
-  return r.stdout.toString().replace(/\r?\n$/, '')
+  if (result.status !== 0 || !result.stdout || result.stdout.length === 0)
+    return null
+  return result.stdout.toString().replace(/\r?\n$/, '')
 }
 
 function inner_prompt_receiver(prompt_file: string, fifo: string): void {
@@ -242,13 +244,13 @@ function get_requesting_command(): string | undefined {
         ' ',
       )
     } else {
-      const r = spawnSync(
+      const command_result = spawnSync(
         'ps',
         ['-o', 'command=', '-p', String(process.ppid)],
         { stdio: ['pipe', 'pipe', 'pipe'] },
       )
-      if (r.status !== 0) return
-      value = r.stdout?.toString() ?? ''
+      if (command_result.status !== 0) return
+      value = command_result.stdout?.toString() ?? ''
     }
 
     value = value
@@ -303,11 +305,15 @@ function adapter_unavailable(adapter: Adapter, detail: string): never {
 // means headless; both fall through to watch mode. `stty -a` is read-only, so
 // it never disturbs the owning application's terminal state.
 function interactive_shell_tty(): boolean {
-  const r = spawnSync('bash', ['-c', 'stty -a < /dev/tty 2>/dev/null'], {
-    stdio: ['ignore', 'pipe', 'inherit'],
-  })
-  if (r.status !== 0) return false
-  const out = r.stdout?.toString() ?? ''
+  const stty_result = spawnSync(
+    'bash',
+    ['-c', 'stty -a < /dev/tty 2>/dev/null'],
+    {
+      stdio: ['ignore', 'pipe', 'inherit'],
+    },
+  )
+  if (stty_result.status !== 0) return false
+  const out = stty_result.stdout?.toString() ?? ''
   // Linux prints `icanon`/`echo`; BSD/macOS prints `canon`/`echo`. Negated
   // flags are prefixed with `-`, which the lookbehind excludes.
   return /(?<!-)(?:i?canon)\b/.test(out) && /(?<!-)echo\b/.test(out)
@@ -457,8 +463,7 @@ function require_npm_install(): void {
   }
 }
 
-function do_upgrade(): never {
-  require_npm_install()
+function latest_npm_version(): string {
   const latest_result = spawnSync(
     'npm',
     ['view', 'sido-askpass@latest', 'version', '--json'],
@@ -486,21 +491,10 @@ function do_upgrade(): never {
     console.error('[sido] npm returned an invalid latest version')
     process.exit(1)
   }
+  return latest
+}
 
-  const comparison = compare_semver(package_json.version, latest)
-  if (comparison === undefined) {
-    console.error(
-      `[sido] cannot compare versions ${package_json.version} and ${latest}`,
-    )
-    process.exit(1)
-  }
-  if (comparison >= 0) {
-    console.error(
-      `[sido] already up to date (${package_json.version}; npm latest is ${latest})`,
-    )
-    process.exit(0)
-  }
-
+function run_npm_upgrade(latest: string): void {
   console.error(
     `[sido] upgrading ${package_json.version} to ${latest} with npm`,
   )
@@ -517,7 +511,9 @@ function do_upgrade(): never {
     console.error(`[sido] npm upgrade failed with status ${upgrade.status}`)
     process.exit(upgrade.status ?? 1)
   }
+}
 
+function refresh_managed_configuration(): never {
   console.error('[sido] refreshing managed configuration')
   const install = spawnSync(self_path, ['install'], {
     stdio: 'inherit',
@@ -529,6 +525,27 @@ function do_upgrade(): never {
     process.exit(1)
   }
   process.exit(install.status ?? 1)
+}
+
+function do_upgrade(): never {
+  require_npm_install()
+  const latest = latest_npm_version()
+  const comparison = compare_semver(package_json.version, latest)
+  if (comparison === undefined) {
+    console.error(
+      `[sido] cannot compare versions ${package_json.version} and ${latest}`,
+    )
+    process.exit(1)
+  }
+  if (comparison >= 0) {
+    console.error(
+      `[sido] already up to date (${package_json.version}; npm latest is ${latest})`,
+    )
+    process.exit(0)
+  }
+
+  run_npm_upgrade(latest)
+  refresh_managed_configuration()
 }
 
 function do_install(scope?: string): void {
@@ -547,64 +564,75 @@ function do_install(scope?: string): void {
     return
   }
 
-  if (scope === '--user') {
-    const path = user_profile_path()
-    const line = `export SUDO_ASKPASS="${self_path}"`
-    let content = existsSync(path) ? readFileSync(path, 'utf-8') + '\n' : ''
-    const managed_pattern = /^# sido\nexport SUDO_ASKPASS=.*$/gm
-    if (managed_pattern.test(content)) {
-      content = content.replace(managed_pattern, `# sido\n${line}`)
-    } else if (/^export SUDO_ASKPASS=.*$/m.test(content)) {
-      const old_values = [
-        ...content.matchAll(/^export SUDO_ASKPASS=(.*)$/gm),
-      ].map((match) => match[1])
-      for (const old_value of old_values) {
-        console.error(
-          `[sido] warning: replacing SUDO_ASKPASS=${old_value} with "${self_path}"`,
-        )
-      }
-      content = content.replace(/^export SUDO_ASKPASS=.*$/gm, `# sido\n${line}`)
-    } else {
-      content += `\n# sido\n${line}\n`
-    }
-    writeFileSync(path, content)
-    console.error(`[sido] installed to ${path}`)
-    console.error(`[sido] run: source ${path}`)
-  } else {
-    const path = sudo_conf_path()
-    const line = `Path askpass ${self_path}`
-    let content = ''
-    if (existsSync(path)) {
-      const r = spawnSync('cat', [path], { stdio: ['pipe', 'pipe', 'pipe'] })
-      content = r.stdout?.toString() ?? ''
-    }
-    const managed_pattern = /^# sido\nPath askpass .*$/gm
-    if (managed_pattern.test(content)) {
-      content = content.replace(managed_pattern, `# sido\n${line}`)
-    } else if (/^Path askpass /m.test(content)) {
-      const old_values = [...content.matchAll(/^Path askpass (.*)$/gm)].map(
-        (match) => match[1],
+  if (scope === '--user') install_user()
+  else install_system()
+}
+
+function install_user(): void {
+  const path = user_profile_path()
+  const line = `export SUDO_ASKPASS="${self_path}"`
+  let content = existsSync(path) ? readFileSync(path, 'utf-8') + '\n' : ''
+  const managed_pattern = /^# sido\nexport SUDO_ASKPASS=.*$/gm
+  if (managed_pattern.test(content)) {
+    content = content.replace(managed_pattern, `# sido\n${line}`)
+  } else if (/^export SUDO_ASKPASS=.*$/m.test(content)) {
+    const old_values = [
+      ...content.matchAll(/^export SUDO_ASKPASS=(.*)$/gm),
+    ].map((match) => match[1])
+    for (const old_value of old_values) {
+      console.error(
+        `[sido] warning: replacing SUDO_ASKPASS=${old_value} with "${self_path}"`,
       )
-      for (const old_value of old_values) {
-        console.error(
-          `[sido] warning: replacing Path askpass ${old_value} with "${self_path}"`,
-        )
-      }
-      content = content.replace(/^Path askpass .*$/gm, `# sido\n${line}`)
-    } else {
-      content += `\n# sido\n${line}\n`
     }
-    const proc = spawnSync('sudo', ['tee', path], {
-      input: content,
-      stdio: ['pipe', 'inherit', 'inherit'],
-    })
-    if (proc.status === 0) {
-      console.error(`[sido] installed to ${path}`)
-    } else {
-      console.error('[sido] install failed — do you have sudo?')
-      process.exit(1)
-    }
+    content = content.replace(/^export SUDO_ASKPASS=.*$/gm, `# sido\n${line}`)
+  } else {
+    content += `\n# sido\n${line}\n`
   }
+  writeFileSync(path, content)
+  console.error(`[sido] installed to ${path}`)
+  console.error(`[sido] run: source ${path}`)
+}
+
+function install_system(): void {
+  const path = sudo_conf_path()
+  const line = `Path askpass ${self_path}`
+  let content = ''
+  if (existsSync(path)) {
+    const read_result = spawnSync('cat', [path], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+    })
+    content = read_result.stdout?.toString() ?? ''
+  }
+  const managed_pattern = /^# sido\nPath askpass .*$/gm
+  if (managed_pattern.test(content)) {
+    content = content.replace(managed_pattern, `# sido\n${line}`)
+  } else if (/^Path askpass /m.test(content)) {
+    const old_values = [...content.matchAll(/^Path askpass (.*)$/gm)].map(
+      (match) => match[1],
+    )
+    for (const old_value of old_values) {
+      console.error(
+        `[sido] warning: replacing Path askpass ${old_value} with "${self_path}"`,
+      )
+    }
+    content = content.replace(/^Path askpass .*$/gm, `# sido\n${line}`)
+  } else {
+    content += `\n# sido\n${line}\n`
+  }
+  const proc = spawnSync('sudo', ['tee', path], {
+    input: content,
+    stdio: ['pipe', 'inherit', 'inherit'],
+  })
+  if (proc.status === 0) {
+    console.error(`[sido] installed to ${path}`)
+  } else {
+    console.error('[sido] install failed — do you have sudo?')
+    process.exit(1)
+  }
+}
+
+function normalize_uninstalled_content(content: string): string {
+  return content.replace(/\n{3,}/g, '\n\n').trim() + '\n'
 }
 
 function do_uninstall(scope: string): void {
@@ -616,8 +644,7 @@ function do_uninstall(scope: string): void {
     }
     let content = readFileSync(path, 'utf-8')
     content = content.replace(/^# sido\nexport SUDO_ASKPASS=.*$\n?/gm, '')
-    content = content.replace(/\n{3,}/g, '\n\n').trim()
-    writeFileSync(path, content + '\n')
+    writeFileSync(path, normalize_uninstalled_content(content))
     console.error(`[sido] removed from ${path}`)
   } else {
     const path = sudo_conf_path()
@@ -625,13 +652,14 @@ function do_uninstall(scope: string): void {
       console.error('[sido] nothing to uninstall')
       process.exit(1)
     }
-    const r = spawnSync('cat', [path], { stdio: ['pipe', 'pipe', 'pipe'] })
-    let content = r.stdout?.toString() ?? ''
+    const read_result = spawnSync('cat', [path], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+    })
+    let content = read_result.stdout?.toString() ?? ''
     content = content.replace(/^# sido\n/gm, '')
     content = content.replace(/^Path askpass .*$/gm, '')
-    content = content.replace(/\n{3,}/g, '\n\n').trim()
     const proc = spawnSync('sudo', ['tee', path], {
-      input: content + '\n',
+      input: normalize_uninstalled_content(content),
       stdio: ['pipe', 'inherit', 'inherit'],
     })
     if (proc.status === 0) {
@@ -647,13 +675,15 @@ function do_status(scope?: string): void {
   if (!scope || scope === '--system') {
     const sys_path = sudo_conf_path()
     if (existsSync(sys_path)) {
-      const r = spawnSync('cat', [sys_path], {
+      const status_result = spawnSync('cat', [sys_path], {
         stdio: ['pipe', 'pipe', 'pipe'],
       })
-      const m = r.stdout?.toString().match(/^Path askpass (.*)$/m)
+      const match = status_result.stdout
+        ?.toString()
+        .match(/^Path askpass (.*)$/m)
       console.error(
-        m
-          ? `[sido] system askpass: ${m[1]}`
+        match
+          ? `[sido] system askpass: ${match[1]}`
           : `[sido] no system askpass in ${sys_path}`,
       )
     } else {
@@ -665,10 +695,10 @@ function do_status(scope?: string): void {
     const user_path = user_profile_path()
     if (existsSync(user_path)) {
       const content = readFileSync(user_path, 'utf-8')
-      const m = content.match(/^export SUDO_ASKPASS=(.*)$/m)
+      const match = content.match(/^export SUDO_ASKPASS=(.*)$/m)
       console.error(
-        m
-          ? `[sido] user askpass in ~/.profile: ${m[1]}`
+        match
+          ? `[sido] user askpass in ~/.profile: ${match[1]}`
           : `[sido] no SUDO_ASKPASS in ~/.profile`,
       )
     }
@@ -737,9 +767,9 @@ function tmux_prompt(): void {
   ].join('\n')
   const script = fifo_drain_script('$1', block_cmd, 'popup_status')
 
-  let r
+  let result
   try {
-    r = spawnSync(
+    result = spawnSync(
       'bash',
       ['-c', script, 'sido', resources.fifo, self_path, resources.prompt_file],
       { stdio: ['inherit', 'pipe', 'inherit'] },
@@ -747,7 +777,7 @@ function tmux_prompt(): void {
   } finally {
     remove_prompt_resources(resources)
   }
-  process.stdout.write(read_stdout(r))
+  process.stdout.write(read_stdout(result))
 }
 
 // ── Herdr ───────────────────────────────────────────────────────────────────
@@ -755,8 +785,8 @@ function tmux_prompt(): void {
 // herdr pane run. Shell job control (&, wait) keeps coordination in one sync
 // call and reaps the background cat on cancel.
 
-function herdr_prompt(allow_fallback: boolean): void {
-  let direction = 'right'
+function herdr_split_direction(): 'right' | 'down' {
+  let direction: 'right' | 'down' = 'right'
   try {
     const layout = spawnSync('herdr', ['pane', 'layout', '--current'], {
       stdio: ['inherit', 'pipe', 'pipe'],
@@ -766,28 +796,39 @@ function herdr_prompt(allow_fallback: boolean): void {
       if ((info.result?.pane?.width ?? 0) <= 150) direction = 'down'
     }
   } catch {}
+  return direction
+}
 
-  console.error(
-    `[sido] password requested — see new pane (${direction === 'right' ? 'right' : 'bottom'})`,
-  )
-
+function create_herdr_pane(direction: 'right' | 'down'): string | undefined {
   const split = spawnSync(
     'herdr',
     ['pane', 'split', '--current', '--direction', direction, '--cwd', '/'],
     { stdio: ['inherit', 'pipe', 'pipe'] },
   )
-  if (split.status !== 0) return void fallback_herdr(allow_fallback)
-  const pane_id = JSON.parse(split.stdout?.toString() ?? '{}').result?.pane
-    ?.pane_id
+  if (split.status !== 0) return
+  return JSON.parse(split.stdout?.toString() ?? '{}').result?.pane?.pane_id
+}
+
+function close_herdr_pane(pane_id: string): void {
+  spawnSync('herdr', ['pane', 'close', pane_id], {
+    stdio: ['pipe', 'pipe', 'pipe'],
+  })
+}
+
+function herdr_prompt(allow_fallback: boolean): void {
+  const direction = herdr_split_direction()
+  console.error(
+    `[sido] password requested — see new pane (${direction === 'right' ? 'right' : 'bottom'})`,
+  )
+
+  const pane_id = create_herdr_pane(direction)
   if (!pane_id) return void fallback_herdr(allow_fallback)
 
   let resources: PromptResources
   try {
     resources = create_prompt_resources()
   } catch (error) {
-    spawnSync('herdr', ['pane', 'close', pane_id], {
-      stdio: ['pipe', 'pipe', 'pipe'],
-    })
+    close_herdr_pane(pane_id)
     console.error(`[sido] ${String(error)}`)
     process.exit(1)
   }
@@ -795,9 +836,9 @@ function herdr_prompt(allow_fallback: boolean): void {
   const block_cmd = `herdr pane run "$1" "$3" _inner_prompt_receiver "$4" "$2"`
   const runner_script = fifo_drain_script('$2', block_cmd, 'run_status')
 
-  let r
+  let result
   try {
-    r = spawnSync(
+    result = spawnSync(
       'bash',
       [
         '-c',
@@ -812,11 +853,9 @@ function herdr_prompt(allow_fallback: boolean): void {
     )
   } finally {
     remove_prompt_resources(resources)
-    spawnSync('herdr', ['pane', 'close', pane_id], {
-      stdio: ['pipe', 'pipe', 'pipe'],
-    })
+    close_herdr_pane(pane_id)
   }
-  process.stdout.write(read_stdout(r))
+  process.stdout.write(read_stdout(result))
 }
 
 function fallback_herdr(allow_fallback: boolean): void {
@@ -836,7 +875,7 @@ function gui_prompt(): void {
 
 function mac_gui(): void {
   const dialog_title = 'Administrator Authentication'
-  const r = spawnSync(
+  const dialog_result = spawnSync(
     'osascript',
     [
       '-e',
@@ -852,8 +891,10 @@ function mac_gui(): void {
     ],
     { stdio: ['inherit', 'pipe', 'inherit'] },
   )
-  if (r.status !== 0) process.exit(1)
-  process.stdout.write(r.stdout?.toString().replace(/\r?\n$/, '') ?? '')
+  if (dialog_result.status !== 0) process.exit(1)
+  process.stdout.write(
+    dialog_result.stdout?.toString().replace(/\r?\n$/, '') ?? '',
+  )
 }
 
 function linux_gui(): void {
@@ -878,11 +919,11 @@ function exact_gui_prompt(command: string, args: string[]): void {
 }
 
 function gui_program_prompt(command: string, args: string[]): boolean {
-  const r = spawnSync(command, args, {
+  const result = spawnSync(command, args, {
     stdio: ['inherit', 'pipe', 'inherit'],
   })
-  if (r.status !== 0) return false
-  process.stdout.write(r.stdout?.toString().replace(/\n$/, '') ?? '')
+  if (result.status !== 0) return false
+  process.stdout.write(result.stdout?.toString().replace(/\n$/, '') ?? '')
   return true
 }
 
@@ -937,9 +978,9 @@ function watch_prompt(): void {
   // External `cat` opens the FIFO read-only and blocks until a writer (the
   // approver) connects. spawnSync's timeout kills it if nobody approves in time
   // — avoiding libuv's uncancellable threadpool open() on a FIFO.
-  let r
+  let result
   try {
-    r = spawnSync('bash', ['-c', 'cat "$1"', 'sido', resources.fifo], {
+    result = spawnSync('bash', ['-c', 'cat "$1"', 'sido', resources.fifo], {
       stdio: ['ignore', 'pipe', 'inherit'],
       timeout: timeout_ms,
       killSignal: 'SIGTERM',
@@ -948,11 +989,11 @@ function watch_prompt(): void {
     remove_prompt_resources(resources)
   }
 
-  if (r!.signal === 'SIGTERM' || r!.status === null) {
+  if (result!.signal === 'SIGTERM' || result!.status === null) {
     console.error('[sido] timed out waiting for approver')
     process.exit(1)
   }
-  process.stdout.write(read_stdout(r!))
+  process.stdout.write(read_stdout(result!))
 }
 
 function do_watch(): void {
@@ -987,9 +1028,9 @@ function newest_request(): string | undefined {
   for (const entry of entries) {
     if (!entry.startsWith('sido-')) continue
     const path = join(sido_dir(), entry)
-    const m = statSync(path).mtimeMs
-    if (m > newest_mtime) {
-      newest_mtime = m
+    const modified_time = statSync(path).mtimeMs
+    if (modified_time > newest_mtime) {
+      newest_mtime = modified_time
       newest = path
     }
   }
@@ -1011,7 +1052,7 @@ function handle_request(req_dir: string): void {
   // Feed the password via stdin, not argv, so it never appears in `ps`. The
   // redirection opens the FIFO write-only and blocks until the waiting shim's
   // reader connects; the timeout covers a shim that already exited/timed out.
-  const r = spawnSync(
+  const writer_result = spawnSync(
     'bash',
     ['-c', 'cat > "$1"', 'sido', join(req_dir, 'password')],
     {
@@ -1021,7 +1062,9 @@ function handle_request(req_dir: string): void {
     },
   )
   console.error(
-    r.status === 0 ? '[sido] password sent' : '[sido] request expired',
+    writer_result.status === 0
+      ? '[sido] password sent'
+      : '[sido] request expired',
   )
   rmSync(req_dir, { recursive: true, force: true })
 }

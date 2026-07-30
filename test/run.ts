@@ -21,7 +21,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const source = join(root, 'src', 'sido-askpass.ts')
 const fixture_dir = join(root, 'test', 'fixtures')
 
-function self_path_for_test(): string {
+function escaped_source_path(): string {
   return source.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
@@ -58,6 +58,15 @@ function run({ args = ['Password: '], env = {} }: RunOptions = {}) {
 
 function assert_clean(): void {
   assert.deepEqual(readdirSync(prompt_tmp), [])
+}
+
+function install_fake_npm(home_name: string, script: string): string {
+  const home = join(test_dir, home_name)
+  const npm = join(bin_dir, 'npm')
+  mkdirSync(home)
+  writeFileSync(npm, script)
+  chmodSync(npm, 0o755)
+  return home
 }
 
 describe('e2e', { concurrency: 1 }, (): void => {
@@ -195,7 +204,7 @@ describe('e2e', { concurrency: 1 }, (): void => {
     assert.equal(result.status, 0, result.stderr)
     assert.match(
       readFileSync(profile, 'utf8'),
-      new RegExp(self_path_for_test()),
+      new RegExp(escaped_source_path()),
     )
   })
 
@@ -241,30 +250,24 @@ describe('e2e', { concurrency: 1 }, (): void => {
   })
 
   test('upgrade installs the latest npm package and refreshes user config', () => {
-    const home = join(test_dir, 'home-upgrade')
     const npm_log = join(test_dir, 'npm-upgrade-args')
-    const npm = join(bin_dir, 'npm')
-    mkdirSync(home)
+    const npm_script = [
+      '#!/usr/bin/env bash',
+      'if [ "$1" = root ]; then',
+      `  printf '%s\\n' ${JSON.stringify(dirname(root))}`,
+      'elif [ "$1" = view ]; then',
+      `  printf '"0.8.0"\\n'`,
+      'else',
+      `  printf '%s\\n' "$@" > "$SIDO_E2E_NPM_LOG"`,
+      'fi',
+      '',
+    ].join('\n')
+    const home = install_fake_npm('home-upgrade', npm_script)
     const install = run({
       args: ['install', '--user'],
       env: { HOME: home },
     })
     assert.equal(install.status, 0, install.stderr)
-    writeFileSync(
-      npm,
-      [
-        '#!/usr/bin/env bash',
-        'if [ "$1" = root ]; then',
-        `  printf '%s\\n' ${JSON.stringify(dirname(root))}`,
-        'elif [ "$1" = view ]; then',
-        `  printf '"0.8.0"\\n'`,
-        'else',
-        `  printf '%s\\n' "$@" > "$SIDO_E2E_NPM_LOG"`,
-        'fi',
-        '',
-      ].join('\n'),
-    )
-    chmodSync(npm, 0o755)
 
     const result = run({
       args: ['upgrade'],
@@ -283,24 +286,18 @@ describe('e2e', { concurrency: 1 }, (): void => {
   })
 
   test('upgrade does not change user config when npm fails', () => {
-    const home = join(test_dir, 'home-upgrade-failure')
-    const npm = join(bin_dir, 'npm')
-    mkdirSync(home)
-    writeFileSync(
-      npm,
-      [
-        '#!/usr/bin/env bash',
-        'if [ "$1" = root ]; then',
-        `  printf '%s\\n' ${JSON.stringify(dirname(root))}`,
-        'elif [ "$1" = view ]; then',
-        `  printf '"0.8.0"\\n'`,
-        'else',
-        '  exit 23',
-        'fi',
-        '',
-      ].join('\n'),
-    )
-    chmodSync(npm, 0o755)
+    const npm_script = [
+      '#!/usr/bin/env bash',
+      'if [ "$1" = root ]; then',
+      `  printf '%s\\n' ${JSON.stringify(dirname(root))}`,
+      'elif [ "$1" = view ]; then',
+      `  printf '"0.8.0"\\n'`,
+      'else',
+      '  exit 23',
+      'fi',
+      '',
+    ].join('\n')
+    const home = install_fake_npm('home-upgrade-failure', npm_script)
 
     const result = run({ args: ['upgrade'], env: { HOME: home } })
     assert.equal(result.status, 23)
@@ -309,26 +306,20 @@ describe('e2e', { concurrency: 1 }, (): void => {
   })
 
   test('upgrade skips npm install when already current', () => {
-    const home = join(test_dir, 'home-upgrade-current')
     const npm_log = join(test_dir, 'npm-upgrade-current-args')
-    const npm = join(bin_dir, 'npm')
-    mkdirSync(home)
-    writeFileSync(
-      npm,
-      [
-        '#!/usr/bin/env bash',
-        'if [ "$1" = root ]; then',
-        `  printf '%s\\n' ${JSON.stringify(dirname(root))}`,
-        'else',
-        `  printf '%s\\n' "$@" >> "$SIDO_E2E_NPM_LOG"`,
-        'fi',
-        'if [ "$1" = view ]; then',
-        `  printf '"${package_json.version}"\\n'`,
-        'fi',
-        '',
-      ].join('\n'),
-    )
-    chmodSync(npm, 0o755)
+    const npm_script = [
+      '#!/usr/bin/env bash',
+      'if [ "$1" = root ]; then',
+      `  printf '%s\\n' ${JSON.stringify(dirname(root))}`,
+      'else',
+      `  printf '%s\\n' "$@" >> "$SIDO_E2E_NPM_LOG"`,
+      'fi',
+      'if [ "$1" = view ]; then',
+      `  printf '"${package_json.version}"\\n'`,
+      'fi',
+      '',
+    ].join('\n')
+    const home = install_fake_npm('home-upgrade-current', npm_script)
 
     const result = run({
       args: ['upgrade'],
@@ -344,16 +335,11 @@ describe('e2e', { concurrency: 1 }, (): void => {
   })
 
   test('upgrade rejects a non-npm installation', () => {
-    const home = join(test_dir, 'home-upgrade-non-npm')
     const npm_root = join(test_dir, 'other-npm-root')
-    const npm = join(bin_dir, 'npm')
-    mkdirSync(home)
     mkdirSync(npm_root)
-    writeFileSync(
-      npm,
-      `#!/usr/bin/env bash\nprintf '%s\\n' ${JSON.stringify(npm_root)}\n`,
-    )
-    chmodSync(npm, 0o755)
+    const npm_script =
+      `#!/usr/bin/env bash\n` + `printf '%s\\n' ${JSON.stringify(npm_root)}\n`
+    const home = install_fake_npm('home-upgrade-non-npm', npm_script)
 
     const result = run({ args: ['upgrade'], env: { HOME: home } })
     assert.equal(result.status, 1)

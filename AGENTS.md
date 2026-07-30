@@ -80,10 +80,13 @@ Passwords never touch disk — tmux, Herdr, and watch mode all use FIFOs (kernel
 
 ```bash
 pnpm typecheck             # tsc (noEmit is in tsconfig)
-pnpm format                # prettier --write .
-pnpm format:check          # prettier --check .
+pnpm format                # prettier --write . (idempotent; use this instead of a check-only command)
 pnpm test                   # fake tmux/Herdr commands + real FIFOs (Linux)
 ```
+
+Run `pnpm format` directly when verifying changes. Do not add or use a
+check-only formatting script; formatting is idempotent, so checking without
+applying it only duplicates work.
 
 ## Key details agents miss
 
