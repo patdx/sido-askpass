@@ -1,10 +1,11 @@
 {
   "name": "sido-askpass",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "SUDO_ASKPASS shim for headless agent environments (tmux, Herdr, GUI, TTY)",
   "license": "MIT",
   "type": "module",
   "bin": {
+    "sido": "dist/sido-askpass.js",
     "sido-askpass": "dist/sido-askpass.js"
   },
   "files": [

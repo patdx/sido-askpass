@@ -10,6 +10,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -20,10 +21,6 @@ import package_json from '../package.json' with { type: 'json' }
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const source = join(root, 'src', 'sido-askpass.ts')
 const fixture_dir = join(root, 'test', 'fixtures')
-
-function escaped_source_path(): string {
-  return source.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-}
 
 function newer_package_version(): string {
   const match = package_json.version.match(/^(\d+)\.(\d+)\./)
@@ -36,13 +33,16 @@ let bin_dir: string
 let prompt_tmp: string
 let mode_log: string
 let pane_log: string
+let cli: string
+let askpass: string
 
 interface RunOptions {
   args?: string[]
   env?: NodeJS.ProcessEnv
+  mode?: 'cli' | 'askpass'
 }
 
-function run({ args = ['Password: '], env = {} }: RunOptions = {}) {
+function run({ args = ['Password: '], env = {}, mode }: RunOptions = {}) {
   const child_env: NodeJS.ProcessEnv = {
     ...process.env,
     PATH: `${bin_dir}:${process.env.PATH}`,
@@ -56,7 +56,25 @@ function run({ args = ['Password: '], env = {} }: RunOptions = {}) {
   delete child_env.WAYLAND_DISPLAY
   Object.assign(child_env, env)
 
-  return spawnSync(process.execPath, [source, ...args], {
+  const cli_commands = new Set([
+    '--help',
+    '--version',
+    'approve',
+    'help',
+    'install',
+    'run',
+    'status',
+    'uninstall',
+    'upgrade',
+    'version',
+    'watch',
+  ])
+  const executable =
+    mode === 'cli' || (mode === undefined && cli_commands.has(args[0] ?? ''))
+      ? cli
+      : askpass
+
+  return spawnSync(executable, args, {
     encoding: 'utf8',
     env: child_env,
     timeout: 3_000,
@@ -106,6 +124,10 @@ describe('e2e', { concurrency: 1 }, (): void => {
     pane_log = join(test_dir, 'panes')
     mkdirSync(bin_dir)
     mkdirSync(prompt_tmp)
+    cli = join(bin_dir, 'sido')
+    askpass = join(bin_dir, 'sido-askpass')
+    symlinkSync(source, cli)
+    symlinkSync(source, askpass)
     for (const command of ['tmux', 'herdr']) {
       const target = join(bin_dir, command)
       copyFileSync(join(fixture_dir, command), target)
@@ -178,7 +200,7 @@ describe('e2e', { concurrency: 1 }, (): void => {
     writeFileSync(pane_log, '')
     const receiver_log = join(test_dir, 'receiver')
     writeFileSync(receiver_log, '')
-    const child = spawn(process.execPath, [source, 'Password: '], {
+    const child = spawn(askpass, ['Password: '], {
       env: {
         ...process.env,
         PATH: `${bin_dir}:${process.env.PATH}`,
@@ -277,7 +299,7 @@ describe('e2e', { concurrency: 1 }, (): void => {
     assert.equal(readFileSync(profile, 'utf8'), 'export KEEP_PROFILE=yes\n')
     assert.equal(
       readFileSync(zshrc, 'utf8'),
-      `eval "$(fnm env)"\nexport KEEP_ZSH=yes\n\n# sido\nexport SUDO_ASKPASS="${source}"\n`,
+      `eval "$(fnm env)"\nexport KEEP_ZSH=yes\n\n# sido\nexport SUDO_ASKPASS="${askpass}"\n`,
     )
     assert.match(install.stderr, /migrated user configuration from .*\.profile/)
     assert.match(install.stderr, /restart your shell/)
@@ -323,9 +345,9 @@ describe('e2e', { concurrency: 1 }, (): void => {
 
     const result = run({ args: ['install'], env: { HOME: home } })
     assert.equal(result.status, 0, result.stderr)
-    assert.match(
+    assert.equal(
       readFileSync(profile, 'utf8'),
-      new RegExp(escaped_source_path()),
+      `# sido\nexport SUDO_ASKPASS="${askpass}"\n`,
     )
   })
 
@@ -355,7 +377,7 @@ describe('e2e', { concurrency: 1 }, (): void => {
     assert.equal(result.status, 0, result.stderr)
     assert.match(result.stdout, /Usage:/)
     assert.match(result.stdout, /askpass mode/)
-    assert.match(result.stdout, /sido-askpass upgrade/)
+    assert.match(result.stdout, /sido upgrade/)
     for (const adapter of [
       'auto',
       'tmux',
@@ -370,6 +392,20 @@ describe('e2e', { concurrency: 1 }, (): void => {
     }
   })
 
+  test('askpass command-like prompts are never parsed as CLI commands', () => {
+    const result = run({
+      args: ['--version'],
+      mode: 'askpass',
+      env: {
+        TMUX: 'e2e',
+        SIDO_E2E_MODE: 'success',
+        SIDO_E2E_MODE_LOG: mode_log,
+      },
+    })
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(result.stdout, 'fake-password')
+  })
+
   test('upgrade installs the latest npm package and refreshes user config', () => {
     const npm_log = join(test_dir, 'npm-upgrade-args')
     const npm_script = [
@@ -377,7 +413,7 @@ describe('e2e', { concurrency: 1 }, (): void => {
       'if [ "$1" = root ]; then',
       `  printf '%s\\n' ${JSON.stringify(dirname(root))}`,
       'elif [ "$1" = view ]; then',
-      `  printf '"${newer_package_version()}"\\n'`,
+      `  printf '["${newer_package_version()}"]\\n'`,
       'else',
       `  printf '%s\\n' "$@" > "$SIDO_E2E_NPM_LOG"`,
       'fi',
@@ -481,7 +517,7 @@ describe('e2e', { concurrency: 1 }, (): void => {
       ],
     })
     assert.equal(result.status, 0, result.stderr)
-    assert.equal(readFileSync(out, 'utf8'), `${source}\nwatch`)
+    assert.equal(readFileSync(out, 'utf8'), `${askpass}\nwatch`)
 
     const missing_separator = run({ args: ['run', 'true'] })
     assert.equal(missing_separator.status, 1)
@@ -535,7 +571,7 @@ describe('e2e', { concurrency: 1 }, (): void => {
     delete env.HERDR_ENV
     delete env.DISPLAY
     delete env.WAYLAND_DISPLAY
-    const child = spawn(process.execPath, [source, 'Password: '], {
+    const child = spawn(askpass, ['Password: '], {
       env,
       stdio: ['ignore', 'pipe', 'pipe'],
     })

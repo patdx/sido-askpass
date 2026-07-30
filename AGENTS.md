@@ -33,7 +33,7 @@ sudo -A <command>          # or plain sudo on modern Fedora (auto-falls back whe
 
 `SIDO_ADAPTER=tmux|herdr|osascript|zenity|kdialog|tty|watch` forces one exact
 adapter. Forced adapters fail rather than falling back. The `run` grammar is
-`sido-askpass run [--adapter <name>] -- <command> [args...]`; `--` is required.
+`sido run [--adapter <name>] -- <command> [args...]`; `--` is required.
 
 ## Install / uninstall / status
 
@@ -57,8 +57,8 @@ no tty at all — the shim parks the request and blocks on a FIFO instead of
 failing. Supply the password from any second terminal:
 
 ```bash
-sido-askpass approve   # approve the most recent pending request (one-shot)
-sido-askpass watch     # long-lived: approve requests as they arrive (Ctrl-C to exit)
+sido approve   # approve the most recent pending request (one-shot)
+sido watch     # long-lived: approve requests as they arrive (Ctrl-C to exit)
 ```
 
 The original terminal is hinted to run `<self> approve`. Requests live under
@@ -98,7 +98,9 @@ applying it only duplicates work.
 - `scripts/build.ts` strips types with Amaro and writes the executable `dist/sido-askpass.js`; there is no bundle.
 - Code style: `snake_case` for all local functions and variables, no semicolons, single quotes, `verbatimModuleSyntax` (type imports must use `import type`).
 - tmux and Herdr prompt functions use embedded bash scripts (`spawnSync('bash', ['-c', ...])`) with shell job control (`&`, `wait`) instead of native `fs` on FIFOs — this is intentional: libuv threadpool `open()` on a FIFO cannot be cancelled from JS, while the shell naturally reaps the background `cat` on cancel. The shared FIFO-drain + reap-on-cancel skeleton is built by `fifo_drain_script()`.
-- In askpass mode (`argv[2]` is not `install`/`uninstall`/`status`/`watch`/`approve`/`run`), the first positional argument is the sudo prompt — not parsed by `parseArgs`.
+- The executable name selects the interface: `sido-askpass` always treats its
+  first positional argument as the sudo/SSH prompt, while `sido` exclusively
+  parses CLI subcommands. Both npm bin names point to the same runtime file.
 - Adapter selection is `SIDO_ADAPTER=auto|tmux|herdr|osascript|zenity|kdialog|tty|watch`; `auto` is the default, while every explicit adapter is exact and must not fall back. `run` accepts `--adapter <name>` before its required `--` command separator.
 - Watch mode is the final fallback when there's no usable inline surface. The tty-vs-watch decision uses a **termios heuristic**: `stty -a < /dev/tty` is parsed for `icanon`+`echo` (canonical → interactive shell → inline `read -s`); a raw-mode tty (a TUI/agent owns the screen) or no tty at all → watch. `stty -a` is read-only and never alters the owning app's terminal state. `SIDO_ADAPTER=watch` forces watch and bypasses detection.
 - Watch parks each request under `$XDG_RUNTIME_DIR/sido` (or `~/.cache/sido`) as a `sido-*` dir (mode 0700) with a mode-0600 `password` FIFO. The shim blocks on a child `cat` of the FIFO with a `spawnSync` timeout (`SIDO_WATCH_TIMEOUT`, default 120s) — killable, unlike a libuv FIFO `open()`. The approver (`approve`/`watch`) writes the password via stdin (`cat > fifo`), never argv.

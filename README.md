@@ -30,13 +30,17 @@ supported.
 
 ## Quick start
 
+The package installs two executable names backed by the same runtime file:
+`sido` is the command-line interface, while `sido-askpass` is reserved for the
+askpass protocol and treats its first argument as a prompt.
+
 ### User setup (recommended)
 
 Install the command, add `SUDO_ASKPASS` to `~/.profile`, and load it into the
 current shell:
 
 ```bash
-npm install -g sido-askpass && sido-askpass install --user
+npm install -g sido-askpass && sido install --user
 ```
 
 User setup selects the startup file from `$SHELL`: `~/.zshrc` for zsh,
@@ -56,7 +60,7 @@ version-manager-provided Node path.
 Install the command and configure `Path askpass` in `/etc/sudo.conf`:
 
 ```bash
-npm install -g sido-askpass && sido-askpass install --system
+npm install -g sido-askpass && sido install --system
 ```
 
 System setup runs `sudo tee` to update `/etc/sudo.conf`, so the installation
@@ -66,7 +70,7 @@ After first setup, rerun the detected managed user and/or system installation
 without remembering its scope:
 
 ```bash
-sido-askpass install
+sido install
 ```
 
 If no managed installation exists yet, `install` requires an explicit `--user`
@@ -76,7 +80,7 @@ To use sido for one command without changing your profile or sudo
 configuration:
 
 ```bash
-sido-askpass run -- sudo -A <command>
+sido run -- sudo -A <command>
 ```
 
 Everything after `--` is run directly without shell parsing. `run` sets
@@ -85,7 +89,7 @@ Everything after `--` is run directly without shell parsing. `run` sets
 an exact prompt adapter for the command with:
 
 ```bash
-sido-askpass run --adapter watch -- sudo -A <command>
+sido run --adapter watch -- sudo -A <command>
 ```
 
 ## Using sudo
@@ -182,7 +186,7 @@ Set `SIDO_ADAPTER` to bypass detection and require one exact adapter:
 | `zenity`    | Open a Zenity password dialog                         |
 | `kdialog`   | Open a KDE password dialog                            |
 | `tty`       | Read a hidden password from `/dev/tty`                |
-| `watch`     | Wait for `sido-askpass approve` from another terminal |
+| `watch`     | Wait for `sido approve` from another terminal         |
 
 An explicitly selected adapter either succeeds or exits with an error. It never
 falls back to another adapter. `run` accepts the same selection as
@@ -190,7 +194,7 @@ falls back to another adapter. `run` accepts the same selection as
 
 ```bash
 SIDO_ADAPTER=osascript sudo -A <command>
-sido-askpass run --adapter tty -- sudo -A <command>
+sido run --adapter tty -- sudo -A <command>
 ```
 
 The prompt also shows the requesting command when the parent process command
@@ -206,8 +210,8 @@ or there is no TTY at all — `sido-askpass` parks the request and waits for a
 password from a second terminal:
 
 ```bash
-sido-askpass approve   # approve the most recent pending request (one-shot)
-sido-askpass watch     # approve requests as they arrive (Ctrl-C to exit)
+sido approve   # approve the most recent pending request (one-shot)
+sido watch     # approve requests as they arrive (Ctrl-C to exit)
 ```
 
 The original terminal prints a hint telling you which command to run. Requests
@@ -222,28 +226,28 @@ Upgrade an npm installation to the latest version and refresh the user
 configuration:
 
 ```bash
-sido-askpass upgrade
+sido upgrade
 ```
 
 The upgrade command currently supports npm global installations only and
 rejects commands installed by another package manager. It checks the latest
 published version, upgrades only when that version is newer, then runs
-`sido-askpass install` to refresh the existing managed configuration. If npm
+`sido install` to refresh the existing managed configuration. If npm
 fails, existing configuration is left unchanged.
 
 Inspect the active environment and installed configuration:
 
 ```bash
-sido-askpass status
-sido-askpass status --user
-sido-askpass status --system
+sido status
+sido status --user
+sido status --system
 ```
 
 Remove either setup:
 
 ```bash
-sido-askpass uninstall --user
-sido-askpass uninstall --system
+sido uninstall --user
+sido uninstall --system
 ```
 
 `--user` and `--system` are mutually exclusive for install, uninstall, and

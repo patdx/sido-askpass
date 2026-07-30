@@ -16,11 +16,20 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { tmpdir, userInfo, hostname, homedir } from 'node:os'
-import { basename, join, resolve, sep } from 'node:path'
+import { basename, dirname, join, resolve, sep } from 'node:path'
 import { parseArgs } from 'node:util'
 import package_json from '../package.json' with { type: 'json' }
 
 const self_path = resolve(process.argv[1]!)
+const invoked_name = basename(self_path)
+const is_askpass =
+  invoked_name === 'sido-askpass' ||
+  invoked_name === 'sido-askpass.js' ||
+  invoked_name === 'sido-askpass.ts'
+const cli_path = is_askpass ? join(dirname(self_path), 'sido') : self_path
+const askpass_path = is_askpass
+  ? self_path
+  : join(dirname(self_path), 'sido-askpass')
 const command = process.argv[2]
 const adapters = [
   'auto',
@@ -44,7 +53,10 @@ if (command === '_inner_prompt_receiver') {
 
 // ── help / version ──────────────────────────────────────────────────────────
 
-if (command === '--help' || command === '-h' || command === 'help') {
+if (
+  !is_askpass &&
+  (command === '--help' || command === '-h' || command === 'help')
+) {
   console.log(`sido-askpass — SUDO_ASKPASS shim for headless agent environments
 
 Name:    sido-askpass
@@ -53,17 +65,16 @@ Author:  patdx
 Repo:    https://github.com/patdx/sido-askpass
 
 Usage:
-  sido-askpass                        askpass mode (invoked by sudo)
-  sido-askpass install [--user|--system]
-  sido-askpass uninstall --user|--system
-  sido-askpass upgrade                    upgrade an npm install and refresh its config
-  sido-askpass status [--user|--system]
-  sido-askpass run [--adapter <name>] -- <command> [args...]
-                                       run a command with SUDO_ASKPASS set
-  sido-askpass watch                    wait for and approve pending requests
-  sido-askpass approve                  approve the most recent pending request
-  sido-askpass --help
-  sido-askpass --version
+  sido install [--user|--system]
+  sido uninstall --user|--system
+  sido upgrade                       upgrade an npm install and refresh its config
+  sido status [--user|--system]
+  sido run [--adapter <name>] -- <command> [args...]
+                                     run a command with SUDO_ASKPASS set
+  sido watch                         wait for and approve pending requests
+  sido approve                       approve the most recent pending request
+  sido --help
+  sido --version
 
 Adapters:
   auto       detect the best adapter (default)
@@ -73,7 +84,7 @@ Adapters:
   zenity     Zenity password dialog
   kdialog    KDE password dialog
   tty        hidden prompt on /dev/tty
-  watch      approve from another terminal with "sido-askpass approve"
+  watch      approve from another terminal with "sido approve"
 
 Env:
   SIDO_ADAPTER=<name>      select an adapter for askpass mode
@@ -81,14 +92,17 @@ Env:
   process.exit(0)
 }
 
-if (command === '--version' || command === '-V' || command === 'version') {
+if (
+  !is_askpass &&
+  (command === '--version' || command === '-V' || command === 'version')
+) {
   console.log(package_json.version)
   process.exit(0)
 }
 
 // ── install / uninstall / status ────────────────────────────────────────────
 
-if (command === 'install' || command === 'uninstall') {
+if (!is_askpass && (command === 'install' || command === 'uninstall')) {
   const { values } = parseArgs({
     args: process.argv.slice(3),
     options: {
@@ -111,7 +125,7 @@ if (command === 'install' || command === 'uninstall') {
   process.exit(0)
 }
 
-if (command === 'status') {
+if (!is_askpass && command === 'status') {
   const { values } = parseArgs({
     args: process.argv.slice(3),
     options: {
@@ -128,26 +142,32 @@ if (command === 'status') {
   process.exit(0)
 }
 
-if (command === 'upgrade') {
+if (!is_askpass && command === 'upgrade') {
   do_upgrade()
 }
 
-if (command === 'run') {
+if (!is_askpass && command === 'run') {
   const run = parse_run_args(process.argv.slice(3))
   do_run(run.command, run.args, run.adapter)
 }
 
-if (command === 'watch') {
+if (!is_askpass && command === 'watch') {
   do_watch()
   process.exit(0)
 }
 
-if (command === 'approve') {
+if (!is_askpass && command === 'approve') {
   do_approve()
   process.exit(0)
 }
 
 // ── askpass mode ───────────────────────────────────────────────────────────
+
+if (!is_askpass) {
+  console.error(`[sido] unknown command: ${command ?? '(none)'}`)
+  console.error(`[sido] run "${self_path} --help" for usage`)
+  process.exit(1)
+}
 
 const prompt = (command || `[sudo] password for ${userInfo().username}: `)
   .replace(/%u/g, userInfo().username)
@@ -407,7 +427,7 @@ function do_run(command: string, args: string[], adapter?: Adapter): never {
   const proc = spawnSync(command, args, {
     env: {
       ...process.env,
-      SUDO_ASKPASS: self_path,
+      SUDO_ASKPASS: askpass_path,
       ...(adapter ? { SIDO_ADAPTER: adapter } : {}),
     },
     stdio: 'inherit',
@@ -520,8 +540,17 @@ function latest_npm_version(): string {
   let latest: string
   try {
     const value: unknown = JSON.parse(latest_result.stdout)
-    if (typeof value !== 'string') throw new Error('not a version string')
-    latest = value
+    if (typeof value === 'string') {
+      latest = value
+    } else if (
+      Array.isArray(value) &&
+      value.length === 1 &&
+      typeof value[0] === 'string'
+    ) {
+      latest = value[0]
+    } else {
+      throw new Error('not a version string')
+    }
   } catch {
     console.error('[sido] npm returned an invalid latest version')
     process.exit(1)
@@ -550,7 +579,7 @@ function run_npm_upgrade(latest: string): void {
 
 function refresh_managed_configuration(): never {
   console.error('[sido] refreshing managed configuration')
-  const install = spawnSync(self_path, ['install'], {
+  const install = spawnSync(cli_path, ['install'], {
     stdio: 'inherit',
   })
   if (install.error) {
@@ -605,7 +634,7 @@ function do_install(scope?: string): void {
 
 function install_user(): void {
   const target_path = user_profile_path()
-  const line = `export SUDO_ASKPASS="${self_path}"`
+  const line = `export SUDO_ASKPASS="${askpass_path}"`
   const migrated_paths: string[] = []
 
   for (const path of user_profile_paths()) {
@@ -634,12 +663,12 @@ function install_user(): void {
   }
   console.error(`[sido] installed to ${target_path}`)
   console.error('[sido] restart your shell, or run:')
-  console.error(`[sido] export SUDO_ASKPASS="${self_path}"`)
+  console.error(`[sido] export SUDO_ASKPASS="${askpass_path}"`)
 }
 
 function install_system(): void {
   const path = sudo_conf_path()
-  const line = `Path askpass ${self_path}`
+  const line = `Path askpass ${askpass_path}`
   let content = ''
   if (existsSync(path)) {
     const read_result = spawnSync('cat', [path], {
@@ -656,7 +685,7 @@ function install_system(): void {
     )
     for (const old_value of old_values) {
       console.error(
-        `[sido] warning: replacing Path askpass ${old_value} with "${self_path}"`,
+        `[sido] warning: replacing Path askpass ${old_value} with "${askpass_path}"`,
       )
     }
     content = content.replace(/^Path askpass .*$/gm, `# sido\n${line}`)
@@ -1050,7 +1079,7 @@ function watch_prompt(): void {
     `[sido] password requested${requesting_command ? ` for: ${requesting_command}` : ''}`,
   )
   console.error(
-    `[sido] from another terminal run: ${self_path} approve  (waiting up to ${Math.round(timeout_ms / 1000)}s)`,
+    `[sido] from another terminal run: ${cli_path} approve  (waiting up to ${Math.round(timeout_ms / 1000)}s)`,
   )
 
   // External `cat` opens the FIFO read-only and blocks until a writer (the
