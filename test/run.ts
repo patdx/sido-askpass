@@ -4,6 +4,7 @@ import { spawn, spawnSync } from 'node:child_process'
 import {
   chmodSync,
   copyFileSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -19,6 +20,10 @@ import package_json from '../package.json' with { type: 'json' }
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const source = join(root, 'src', 'sido-askpass.ts')
 const fixture_dir = join(root, 'test', 'fixtures')
+
+function self_path_for_test(): string {
+  return source.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
 
 let test_dir: string
 let bin_dir: string
@@ -180,6 +185,29 @@ describe('e2e', { concurrency: 1 }, (): void => {
     assert.equal(readFileSync(profile, 'utf8'), 'export KEEP_ME=yes\n')
   })
 
+  test('install without a scope reapplies an existing managed install', () => {
+    const home = join(test_dir, 'home-install-detect')
+    const profile = join(home, '.profile')
+    mkdirSync(home)
+    writeFileSync(profile, '# sido\nexport SUDO_ASKPASS="/old/sido-askpass"\n')
+
+    const result = run({ args: ['install'], env: { HOME: home } })
+    assert.equal(result.status, 0, result.stderr)
+    assert.match(
+      readFileSync(profile, 'utf8'),
+      new RegExp(self_path_for_test()),
+    )
+  })
+
+  test('install without a scope requires one for first setup', () => {
+    const home = join(test_dir, 'home-install-new')
+    mkdirSync(home)
+    const result = run({ args: ['install'], env: { HOME: home } })
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /no existing installation found/)
+    assert.match(result.stderr, /install --user\|--system/)
+  })
+
   test('status rejects mutually exclusive scopes', () => {
     const result = run({ args: ['status', '--user', '--system'] })
     assert.equal(result.status, 1)
@@ -197,6 +225,7 @@ describe('e2e', { concurrency: 1 }, (): void => {
     assert.equal(result.status, 0, result.stderr)
     assert.match(result.stdout, /Usage:/)
     assert.match(result.stdout, /askpass mode/)
+    assert.match(result.stdout, /sido-askpass upgrade/)
     for (const adapter of [
       'auto',
       'tmux',
@@ -209,6 +238,126 @@ describe('e2e', { concurrency: 1 }, (): void => {
     ]) {
       assert.match(result.stdout, new RegExp(`^  ${adapter} `, 'm'))
     }
+  })
+
+  test('upgrade installs the latest npm package and refreshes user config', () => {
+    const home = join(test_dir, 'home-upgrade')
+    const npm_log = join(test_dir, 'npm-upgrade-args')
+    const npm = join(bin_dir, 'npm')
+    mkdirSync(home)
+    const install = run({
+      args: ['install', '--user'],
+      env: { HOME: home },
+    })
+    assert.equal(install.status, 0, install.stderr)
+    writeFileSync(
+      npm,
+      [
+        '#!/usr/bin/env bash',
+        'if [ "$1" = root ]; then',
+        `  printf '%s\\n' ${JSON.stringify(dirname(root))}`,
+        'elif [ "$1" = view ]; then',
+        `  printf '"0.7.0"\\n'`,
+        'else',
+        `  printf '%s\\n' "$@" > "$SIDO_E2E_NPM_LOG"`,
+        'fi',
+        '',
+      ].join('\n'),
+    )
+    chmodSync(npm, 0o755)
+
+    const result = run({
+      args: ['upgrade'],
+      env: { HOME: home, SIDO_E2E_NPM_LOG: npm_log },
+    })
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(
+      readFileSync(npm_log, 'utf8'),
+      'install\n--global\nsido-askpass@latest\n',
+    )
+    assert.match(
+      readFileSync(join(home, '.profile'), 'utf8'),
+      /^# sido\nexport SUDO_ASKPASS=/m,
+    )
+    assert.match(result.stderr, /refreshing managed configuration/)
+  })
+
+  test('upgrade does not change user config when npm fails', () => {
+    const home = join(test_dir, 'home-upgrade-failure')
+    const npm = join(bin_dir, 'npm')
+    mkdirSync(home)
+    writeFileSync(
+      npm,
+      [
+        '#!/usr/bin/env bash',
+        'if [ "$1" = root ]; then',
+        `  printf '%s\\n' ${JSON.stringify(dirname(root))}`,
+        'elif [ "$1" = view ]; then',
+        `  printf '"0.7.0"\\n'`,
+        'else',
+        '  exit 23',
+        'fi',
+        '',
+      ].join('\n'),
+    )
+    chmodSync(npm, 0o755)
+
+    const result = run({ args: ['upgrade'], env: { HOME: home } })
+    assert.equal(result.status, 23)
+    assert.match(result.stderr, /npm upgrade failed with status 23/)
+    assert.equal(existsSync(join(home, '.profile')), false)
+  })
+
+  test('upgrade skips npm install when already current', () => {
+    const home = join(test_dir, 'home-upgrade-current')
+    const npm_log = join(test_dir, 'npm-upgrade-current-args')
+    const npm = join(bin_dir, 'npm')
+    mkdirSync(home)
+    writeFileSync(
+      npm,
+      [
+        '#!/usr/bin/env bash',
+        'if [ "$1" = root ]; then',
+        `  printf '%s\\n' ${JSON.stringify(dirname(root))}`,
+        'else',
+        `  printf '%s\\n' "$@" >> "$SIDO_E2E_NPM_LOG"`,
+        'fi',
+        'if [ "$1" = view ]; then',
+        `  printf '"${package_json.version}"\\n'`,
+        'fi',
+        '',
+      ].join('\n'),
+    )
+    chmodSync(npm, 0o755)
+
+    const result = run({
+      args: ['upgrade'],
+      env: { HOME: home, SIDO_E2E_NPM_LOG: npm_log },
+    })
+    assert.equal(result.status, 0, result.stderr)
+    assert.match(result.stderr, /already up to date/)
+    assert.equal(
+      readFileSync(npm_log, 'utf8'),
+      'view\nsido-askpass@latest\nversion\n--json\n',
+    )
+    assert.equal(existsSync(join(home, '.profile')), false)
+  })
+
+  test('upgrade rejects a non-npm installation', () => {
+    const home = join(test_dir, 'home-upgrade-non-npm')
+    const npm_root = join(test_dir, 'other-npm-root')
+    const npm = join(bin_dir, 'npm')
+    mkdirSync(home)
+    mkdirSync(npm_root)
+    writeFileSync(
+      npm,
+      `#!/usr/bin/env bash\nprintf '%s\\n' ${JSON.stringify(npm_root)}\n`,
+    )
+    chmodSync(npm, 0o755)
+
+    const result = run({ args: ['upgrade'], env: { HOME: home } })
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /npm global installations only/)
   })
 
   test('run requires -- and sets SUDO_ASKPASS and the adapter', () => {

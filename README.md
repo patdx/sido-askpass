@@ -53,6 +53,16 @@ npm install -g sido-askpass && sido-askpass install --system
 System setup runs `sudo tee` to update `/etc/sudo.conf`, so the installation
 command itself must be run somewhere sudo can authenticate.
 
+After first setup, rerun the detected managed user and/or system installation
+without remembering its scope:
+
+```bash
+sido-askpass install
+```
+
+If no managed installation exists yet, `install` requires an explicit `--user`
+or `--system`.
+
 To use sido for one command without changing your profile or sudo
 configuration:
 
@@ -198,6 +208,19 @@ through a kernel FIFO, never a file. `SIDO_ADAPTER=watch` selects watch mode;
 120).
 
 ## Status and removal
+
+Upgrade an npm installation to the latest version and refresh the user
+configuration:
+
+```bash
+sido-askpass upgrade
+```
+
+The upgrade command currently supports npm global installations only and
+rejects commands installed by another package manager. It checks the latest
+published version, upgrades only when that version is newer, then runs
+`sido-askpass install` to refresh the existing managed configuration. If npm
+fails, existing configuration is left unchanged.
 
 Inspect the active environment and installed configuration:
 

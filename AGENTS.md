@@ -38,10 +38,12 @@ adapter. Forced adapters fail rather than falling back. The `run` grammar is
 ## Install / uninstall / status
 
 ```bash
-./src/sido-askpass.ts install --user       # adds export SUDO_ASKPASS to ~/.profile
+./src/sido-askpass.ts install --user       # first user install to ~/.profile
+./src/sido-askpass.ts install              # reapplies detected managed scopes
 ./src/sido-askpass.ts install --system      # Path askpass in /etc/sudo.conf via sudo tee
 ./src/sido-askpass.ts uninstall --user      # reverts ~/.profile
 ./src/sido-askpass.ts uninstall --system    # reverts /etc/sudo.conf
+./src/sido-askpass.ts upgrade               # npm upgrade + refreshes managed config
 ./src/sido-askpass.ts status [--user|--system]
 ```
 

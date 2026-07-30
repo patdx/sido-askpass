@@ -10,12 +10,13 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
   statSync,
   writeFileSync,
 } from 'node:fs'
 import { tmpdir, userInfo, hostname, homedir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { join, resolve, sep } from 'node:path'
 import { parseArgs } from 'node:util'
 import package_json from '../package.json' with { type: 'json' }
 
@@ -53,8 +54,9 @@ Repo:    https://github.com/patdx/sido-askpass
 
 Usage:
   sido-askpass                        askpass mode (invoked by sudo)
-  sido-askpass install --user|--system
+  sido-askpass install [--user|--system]
   sido-askpass uninstall --user|--system
+  sido-askpass upgrade                    upgrade an npm install and refresh its config
   sido-askpass status [--user|--system]
   sido-askpass run [--adapter <name>] -- <command> [args...]
                                        run a command with SUDO_ASKPASS set
@@ -94,13 +96,18 @@ if (command === 'install' || command === 'uninstall') {
       system: { type: 'boolean' },
     },
   })
-  if ((values.user && values.system) || (!values.user && !values.system)) {
-    console.error(`[sido] usage: ${self_path} ${command} --user|--system`)
+  if (
+    (values.user && values.system) ||
+    (command === 'uninstall' && !values.user && !values.system)
+  ) {
+    const scope_usage =
+      command === 'install' ? '[--user|--system]' : '--user|--system'
+    console.error(`[sido] usage: ${self_path} ${command} ${scope_usage}`)
     process.exit(1)
   }
-  const scope = values.user ? '--user' : '--system'
+  const scope = values.user ? '--user' : values.system ? '--system' : undefined
   if (command === 'install') do_install(scope)
-  else do_uninstall(scope)
+  else do_uninstall(scope!)
   process.exit(0)
 }
 
@@ -119,6 +126,10 @@ if (command === 'status') {
   const scope = values.user ? '--user' : values.system ? '--system' : undefined
   do_status(scope)
   process.exit(0)
+}
+
+if (command === 'upgrade') {
+  do_upgrade()
 }
 
 if (command === 'run') {
@@ -368,7 +379,174 @@ function do_run(command: string, args: string[], adapter?: Adapter): never {
   process.exit(proc.status ?? 1)
 }
 
-function do_install(scope: string): void {
+function compare_semver(left: string, right: string): number | undefined {
+  const parse = (value: string) => {
+    const match = value.match(
+      /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/,
+    )
+    if (!match) return
+    return {
+      core: [Number(match[1]), Number(match[2]), Number(match[3])],
+      prerelease: match[4]?.split('.'),
+    }
+  }
+  const a = parse(left)
+  const b = parse(right)
+  if (!a || !b) return
+  for (let i = 0; i < a.core.length; i++) {
+    if (a.core[i]! !== b.core[i]!) return a.core[i]! < b.core[i]! ? -1 : 1
+  }
+  if (!a.prerelease && !b.prerelease) return 0
+  if (!a.prerelease) return 1
+  if (!b.prerelease) return -1
+  const length = Math.max(a.prerelease.length, b.prerelease.length)
+  for (let i = 0; i < length; i++) {
+    const x = a.prerelease[i]
+    const y = b.prerelease[i]
+    if (x === undefined) return -1
+    if (y === undefined) return 1
+    if (x === y) continue
+    const x_numeric = /^\d+$/.test(x)
+    const y_numeric = /^\d+$/.test(y)
+    if (x_numeric && y_numeric) return Number(x) < Number(y) ? -1 : 1
+    if (x_numeric !== y_numeric) return x_numeric ? -1 : 1
+    return x < y ? -1 : 1
+  }
+  return 0
+}
+
+function has_managed_user_install(): boolean {
+  const path = user_profile_path()
+  return (
+    existsSync(path) &&
+    /^# sido\nexport SUDO_ASKPASS=.*$/m.test(readFileSync(path, 'utf8'))
+  )
+}
+
+function has_managed_system_install(): boolean {
+  const path = sudo_conf_path()
+  if (!existsSync(path)) return false
+  const result = spawnSync('cat', [path], { stdio: ['pipe', 'pipe', 'pipe'] })
+  return /^# sido\nPath askpass .*$/m.test(result.stdout?.toString() ?? '')
+}
+
+function require_npm_install(): void {
+  const root = spawnSync('npm', ['root', '--global'], {
+    stdio: ['inherit', 'pipe', 'inherit'],
+    encoding: 'utf8',
+  })
+  if (root.error || root.status !== 0) {
+    console.error('[sido] upgrade requires npm and an npm global installation')
+    process.exit(1)
+  }
+
+  try {
+    const package_path = realpathSync(join(root.stdout.trim(), 'sido-askpass'))
+    const executable_path = realpathSync(self_path)
+    if (
+      executable_path !== package_path &&
+      !executable_path.startsWith(`${package_path}${sep}`)
+    ) {
+      throw new Error('outside npm package')
+    }
+  } catch {
+    console.error(
+      '[sido] upgrade supports npm global installations only; use the original package manager to upgrade',
+    )
+    process.exit(1)
+  }
+}
+
+function do_upgrade(): never {
+  require_npm_install()
+  const latest_result = spawnSync(
+    'npm',
+    ['view', 'sido-askpass@latest', 'version', '--json'],
+    { stdio: ['inherit', 'pipe', 'inherit'], encoding: 'utf8' },
+  )
+  if (latest_result.error) {
+    console.error(
+      `[sido] could not check npm for upgrades: ${latest_result.error.message}`,
+    )
+    process.exit(1)
+  }
+  if (latest_result.status !== 0) {
+    console.error(
+      `[sido] could not check npm for upgrades (status ${latest_result.status})`,
+    )
+    process.exit(latest_result.status ?? 1)
+  }
+
+  let latest: string
+  try {
+    const value: unknown = JSON.parse(latest_result.stdout)
+    if (typeof value !== 'string') throw new Error('not a version string')
+    latest = value
+  } catch {
+    console.error('[sido] npm returned an invalid latest version')
+    process.exit(1)
+  }
+
+  const comparison = compare_semver(package_json.version, latest)
+  if (comparison === undefined) {
+    console.error(
+      `[sido] cannot compare versions ${package_json.version} and ${latest}`,
+    )
+    process.exit(1)
+  }
+  if (comparison >= 0) {
+    console.error(
+      `[sido] already up to date (${package_json.version}; npm latest is ${latest})`,
+    )
+    process.exit(0)
+  }
+
+  console.error(
+    `[sido] upgrading ${package_json.version} to ${latest} with npm`,
+  )
+  const upgrade = spawnSync(
+    'npm',
+    ['install', '--global', 'sido-askpass@latest'],
+    { stdio: 'inherit' },
+  )
+  if (upgrade.error) {
+    console.error(`[sido] npm upgrade failed: ${upgrade.error.message}`)
+    process.exit(1)
+  }
+  if (upgrade.status !== 0) {
+    console.error(`[sido] npm upgrade failed with status ${upgrade.status}`)
+    process.exit(upgrade.status ?? 1)
+  }
+
+  console.error('[sido] refreshing managed configuration')
+  const install = spawnSync(self_path, ['install'], {
+    stdio: 'inherit',
+  })
+  if (install.error) {
+    console.error(
+      `[sido] upgraded, but configuration refresh failed: ${install.error.message}`,
+    )
+    process.exit(1)
+  }
+  process.exit(install.status ?? 1)
+}
+
+function do_install(scope?: string): void {
+  if (!scope) {
+    const scopes = [
+      ...(has_managed_user_install() ? ['--user'] : []),
+      ...(has_managed_system_install() ? ['--system'] : []),
+    ]
+    if (scopes.length === 0) {
+      console.error(
+        `[sido] no existing installation found; use: ${self_path} install --user|--system`,
+      )
+      process.exit(1)
+    }
+    for (const existing_scope of scopes) do_install(existing_scope)
+    return
+  }
+
   if (scope === '--user') {
     const path = user_profile_path()
     const line = `export SUDO_ASKPASS="${self_path}"`
