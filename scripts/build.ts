@@ -1,12 +1,18 @@
-import { readFileSync, writeFileSync, mkdirSync, chmodSync } from 'node:fs'
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { transformSync } from 'amaro'
 
-const src = readFileSync(
-  new URL('../src/sido-askpass.ts', import.meta.url),
-  'utf8',
-)
-const { code } = transformSync(src, { mode: 'strip-only' })
 mkdirSync(new URL('../dist', import.meta.url), { recursive: true })
-const out = new URL('../dist/sido-askpass.js', import.meta.url)
-writeFileSync(out, code)
-chmodSync(out, 0o755)
+
+for (const name of ['shared', 'sido', 'sido-askpass']) {
+  const source = readFileSync(
+    new URL(`../src/${name}.ts`, import.meta.url),
+    'utf8',
+  )
+  const { code } = transformSync(source, { mode: 'strip-only' })
+  const output = new URL(`../dist/${name}.js`, import.meta.url)
+  writeFileSync(
+    output,
+    code.replace("from './shared.ts'", "from './shared.js'"),
+  )
+  if (name !== 'shared') chmodSync(output, 0o755)
+}

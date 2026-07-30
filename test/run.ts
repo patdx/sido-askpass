@@ -19,7 +19,8 @@ import { fileURLToPath } from 'node:url'
 import package_json from '../package.json' with { type: 'json' }
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-const source = join(root, 'src', 'sido-askpass.ts')
+const cli_source = join(root, 'src', 'sido.ts')
+const askpass_source = join(root, 'src', 'sido-askpass.ts')
 const fixture_dir = join(root, 'test', 'fixtures')
 
 function newer_package_version(): string {
@@ -126,8 +127,8 @@ describe('e2e', { concurrency: 1 }, (): void => {
     mkdirSync(prompt_tmp)
     cli = join(bin_dir, 'sido')
     askpass = join(bin_dir, 'sido-askpass')
-    symlinkSync(source, cli)
-    symlinkSync(source, askpass)
+    symlinkSync(cli_source, cli)
+    symlinkSync(askpass_source, askpass)
     for (const command of ['tmux', 'herdr']) {
       const target = join(bin_dir, command)
       copyFileSync(join(fixture_dir, command), target)

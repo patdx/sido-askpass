@@ -1,7 +1,7 @@
 # sido-askpass
 
-Single-runtime-file `SUDO_ASKPASS` shim with a build step and dependency-free
-end-to-end fixtures.
+Dependency-free `SUDO_ASKPASS` shim with separate manager and askpass entry
+points, a shared module, and end-to-end fixtures.
 
 ## Runtime
 
@@ -9,7 +9,9 @@ Node.js 24.x — runs `.ts` directly via built-in type stripping. No flags neede
 
 ## File
 
-- `src/sido-askpass.ts` — the entire project; builds to `dist/sido-askpass.js`
+- `src/sido.ts` — manager CLI entry; builds to `dist/sido.js`
+- `src/sido-askpass.ts` — askpass entry; builds to `dist/sido-askpass.js`
+- `src/shared.ts` — implementation shared by both entries
 
 ## Usage
 
@@ -38,13 +40,13 @@ adapter. Forced adapters fail rather than falling back. The `run` grammar is
 ## Install / uninstall / status
 
 ```bash
-./src/sido-askpass.ts install --user       # first user install to shell startup file
-./src/sido-askpass.ts install              # reapplies detected managed scopes
-./src/sido-askpass.ts install --system      # Path askpass in /etc/sudo.conf via sudo tee
-./src/sido-askpass.ts uninstall --user      # removes managed shell entries
-./src/sido-askpass.ts uninstall --system    # reverts /etc/sudo.conf
-./src/sido-askpass.ts upgrade               # npm upgrade + refreshes managed config
-./src/sido-askpass.ts status [--user|--system]
+./src/sido.ts install --user       # first user install to shell startup file
+./src/sido.ts install              # reapplies detected managed scopes
+./src/sido.ts install --system      # Path askpass in /etc/sudo.conf via sudo tee
+./src/sido.ts uninstall --user      # removes managed shell entries
+./src/sido.ts uninstall --system    # reverts /etc/sudo.conf
+./src/sido.ts upgrade               # npm upgrade + refreshes managed config
+./src/sido.ts status [--user|--system]
 ```
 
 `--user` and `--system` are mutually exclusive (enforced via `parseArgs`).
@@ -95,12 +97,13 @@ applying it only duplicates work.
   compatibility paths when explicitly requested.
 - This is a **Node.js** project. There are no runtime deps.
 - `package.json` pins pnpm version (`packageManager`) and has dev deps only (`@types/node`, `amaro`, `prettier`, `typescript`). No runtime deps.
-- `scripts/build.ts` strips types with Amaro and writes the executable `dist/sido-askpass.js`; there is no bundle.
+- `scripts/build.ts` strips types with Amaro and writes `dist/sido.js`,
+  `dist/sido-askpass.js`, and `dist/shared.js`; there is no bundle.
 - Code style: `snake_case` for all local functions and variables, no semicolons, single quotes, `verbatimModuleSyntax` (type imports must use `import type`).
 - tmux and Herdr prompt functions use embedded bash scripts (`spawnSync('bash', ['-c', ...])`) with shell job control (`&`, `wait`) instead of native `fs` on FIFOs — this is intentional: libuv threadpool `open()` on a FIFO cannot be cancelled from JS, while the shell naturally reaps the background `cat` on cancel. The shared FIFO-drain + reap-on-cancel skeleton is built by `fifo_drain_script()`.
-- The executable name selects the interface: `sido-askpass` always treats its
-  first positional argument as the sudo/SSH prompt, while `sido` exclusively
-  parses CLI subcommands. Both npm bin names point to the same runtime file.
+- The entry point selects the interface: `sido-askpass` always treats its first
+  positional argument as the sudo/SSH prompt, while `sido` exclusively parses
+  CLI subcommands. Each npm bin name points to its dedicated runtime file.
 - Adapter selection is `SIDO_ADAPTER=auto|tmux|herdr|osascript|zenity|kdialog|tty|watch`; `auto` is the default, while every explicit adapter is exact and must not fall back. `run` accepts `--adapter <name>` before its required `--` command separator.
 - Watch mode is the final fallback when there's no usable inline surface. The tty-vs-watch decision uses a **termios heuristic**: `stty -a < /dev/tty` is parsed for `icanon`+`echo` (canonical → interactive shell → inline `read -s`); a raw-mode tty (a TUI/agent owns the screen) or no tty at all → watch. `stty -a` is read-only and never alters the owning app's terminal state. `SIDO_ADAPTER=watch` forces watch and bypasses detection.
 - Watch parks each request under `$XDG_RUNTIME_DIR/sido` (or `~/.cache/sido`) as a `sido-*` dir (mode 0700) with a mode-0600 `password` FIFO. The shim blocks on a child `cat` of the FIFO with a `spawnSync` timeout (`SIDO_WATCH_TIMEOUT`, default 120s) — killable, unlike a libuv FIFO `open()`. The approver (`approve`/`watch`) writes the password via stdin (`cat > fifo`), never argv.
