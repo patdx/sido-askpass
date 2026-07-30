@@ -566,18 +566,20 @@ function gui_prompt(): void {
 }
 
 function mac_gui(): void {
+  const dialog_title = 'Administrator Authentication'
   const r = spawnSync(
     'osascript',
     [
       '-e',
       'on run argv',
       '-e',
-      'display dialog (item 1 of argv) with hidden answer default answer ""',
+      'display dialog (item 1 of argv) with title (item 2 of argv) with icon caution with hidden answer default answer "" buttons {"Cancel", "Authenticate"} default button "Authenticate" cancel button "Cancel"',
       '-e',
       'text returned of result',
       '-e',
       'end run',
       display_prompt,
+      dialog_title,
     ],
     { stdio: ['inherit', 'pipe', 'inherit'] },
   )
