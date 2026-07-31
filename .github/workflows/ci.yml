@@ -13,31 +13,27 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@v4
 
-      - name: Install pnpm
-        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+      - name: Set up Go
+        uses: actions/setup-go@v5
         with:
-          run_install: false
+          go-version-file: go-src/go.mod
 
-      - name: Set up Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - name: Set up Node.js (for npm publish)
+        uses: actions/setup-node@v4
         with:
           node-version-file: '.node-version'
-          cache: 'pnpm'
           registry-url: 'https://registry.npmjs.org'
 
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+      - name: Vet
+        run: cd go-src && go vet ./...
 
-      - name: Typecheck
-        run: pnpm typecheck
+      - name: Test
+        run: cd go-src && go test ./...
 
       - name: Build
-        run: pnpm build
-
-      - name: End-to-end tests
-        run: pnpm test
+        run: bash scripts/build-go.sh
 
       - name: Publish if version is new
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -48,4 +44,6 @@ jobs:
             echo "Already published: $name@$version"
             exit 0
           fi
-          pnpm publish --access public --no-git-checks --ignore-scripts
+          npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

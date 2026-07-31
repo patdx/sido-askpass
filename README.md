@@ -2,7 +2,6 @@
 
 [![npm version](https://img.shields.io/npm/v/sido-askpass)](https://www.npmjs.com/package/sido-askpass)
 [![CI](https://github.com/patdx/sido-askpass/actions/workflows/ci.yml/badge.svg)](https://github.com/patdx/sido-askpass/actions/workflows/ci.yml)
-[![Node.js version](https://img.shields.io/node/v/sido-askpass)](https://nodejs.org/)
 [![License](https://img.shields.io/npm/l/sido-askpass)](https://github.com/patdx/sido-askpass/blob/main/LICENSE)
 
 `SUDO_ASKPASS` shim for tmux, Herdr, coding agents, and other environments
@@ -10,6 +9,12 @@ without a usable TTY.
 
 When sudo uses askpass, `sido-askpass` opens a hidden password prompt and
 returns the password to sudo. Passwords never touch a regular file.
+
+`sido` is written in Go and ships as a single native binary per platform
+(Linux x86_64 and macOS arm64), distributed through npm. The `sido` and
+`sido-askpass` executables are tiny POSIX `sh` launchers that pick the right
+binary for your OS; `sido-askpass` is just an alias for `sido askpass`. No
+Node.js or bash is required at runtime.
 
 Works with:
 
@@ -22,17 +27,17 @@ Works with:
 - **Raw terminals** — `/dev/tty` fallback when an interactive shell owns the TTY
 - **Watch mode** — approve from a second terminal when a TUI/agent owns the TTY (e.g. `ssh` → coding agent → `sudo` with no tmux/Herdr)
 
-Supports Linux and macOS. Requires **Node.js 24+**. Bash is required for the
-tmux, Herdr, `/dev/tty`, and watch backends; tmux, Herdr, and watch also require
-`mkfifo`.
-Linux GUI prompting requires either `zenity` or `kdialog`. Windows is not
-supported.
+Supports Linux (x86_64) and macOS (arm64). Distributed as native binaries — no
+Node.js or bash at runtime. tmux/Herdr/GUI prompting requires the respective
+external tool (`tmux`, `herdr`, or `zenity`/`kdialog`); the `/dev/tty` and watch
+backends need only a POSIX shell (for the launcher). Windows is not supported.
 
 ## Quick start
 
-The package installs two executable names backed by the same runtime file:
-`sido` is the command-line interface, while `sido-askpass` is reserved for the
-askpass protocol and treats its first argument as a prompt.
+The package installs two executable names: `sido` is the command-line interface,
+while `sido-askpass` is reserved for the askpass protocol (it is an alias for
+`sido askpass` and treats its first argument as a prompt). Both are shell
+launchers that exec the platform binary (`sido-mac` / `sido-linux`).
 
 ### User setup (recommended)
 
@@ -54,8 +59,7 @@ Unmanaged `SUDO_ASKPASS` entries are preserved.
 Restart the shell after installation, or activate the current session with the
 exact `export SUDO_ASKPASS=...` command printed by the installer.
 Shell startup configuration covers interactive shell sessions; GUI applications
-launched without that shell environment may not inherit `SUDO_ASKPASS` or a
-version-manager-provided Node path.
+launched without that shell environment may not inherit `SUDO_ASKPASS`.
 
 ### System setup
 
@@ -137,12 +141,12 @@ outside the zsh alias.
 | ---------------------------- | ----------------- | -------------- | -------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------- |
 | Linux, tmux 3.7b             | Automatic review  | tmux popup     | `sudo -A`      | Tested      | The sandbox cannot reach tmux; the approved retry outside the sandbox succeeds.                                                       |
 | Linux, Herdr 0.7.5           | Automatic review  | Herdr pane     | `sudo -A`      | Tested      | The sandbox cannot reach Herdr; the approved retry outside the sandbox succeeds.                                                      |
-| Fedora 44, raw Wayland shell | Automatic review  | Zenity 4.2.2   | `sudo -A true` | Tested      | 2026-07-30, sudo 1.9.17p2, Node.js 24.18.0; no tmux, Herdr, or stdin TTY.                                                             |
+| Fedora 44, raw Wayland shell | Automatic review  | Zenity 4.2.2   | `sudo -A true` | Tested      | 2026-07-30, sudo 1.9.17p2; no tmux, Herdr, or stdin TTY.                                                                             |
 | Linux, any terminal          | Full Access       | First matching | `sudo -A`      | Supported   | sudo and the selected prompt backend can run outside the sandbox.                                                                     |
 | Linux, any terminal          | Workspace-write   | None           | Any sudo       | Unsupported | `no_new_privileges` blocks sudo; changing the askpass backend cannot bypass this.                                                     |
 | Linux, pseudo-TTY command    | Any sudo-capable  | Askpass        | Plain `sudo`   | Skipped     | sudo uses the allocated TTY instead of askpass; use `sudo -A` to force askpass.                                                       |
 | Linux, raw terminal          | Automatic review  | `/dev/tty`     | `sudo -A`      | Untested    | No tmux, Herdr, `DISPLAY`, or Wayland; requires an accessible controlling terminal.                                                   |
-| Linux, pi (no TTY, GUI)      | Automatic review  | Zenity         | Plain `sudo`   | Tested      | 2026-07-30, sudo 1.9.17p2, Node.js 24.18.0: no tmux, Herdr, or TTY; `DISPLAY`+zenity available. Plain sudo auto-fell back to askpass. |
+| Linux, pi (no TTY, GUI)      | Automatic review  | Zenity         | Plain `sudo`   | Tested      | 2026-07-30, sudo 1.9.17p2: no tmux, Herdr, or TTY; `DISPLAY`+zenity available. Plain sudo auto-fell back to askpass.                  |
 | macOS                        | Any               | AppleScript    | `sudo -A`      | Untested    | The dialog backend exists, but Codex sandbox and approval behavior has not been tested.                                               |
 
 Codex automatic approval review does not widen the sandbox itself. It is useful
@@ -162,21 +166,21 @@ This gives Codex an actionable reason to retry with escalated permission.
 
 | Client   | Compatibility | Notes                                                                                                                       |
 | -------- | ------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| Pi       | Tested        | No TTY — plain `sudo` auto-falls back to askpass; zenity GUI prompt. 2026-07-30, Fedora 44, Node.js 24.18.0, sudo 1.9.17p2. |
-| OpenCode | Tested        | 2026-07-30, Fedora 44, Node.js 24.18.0, `/dev/tty` fallback, `sudo -A whoami` → `root`.                                     |
+| Pi       | Tested        | No TTY — plain `sudo` auto-falls back to askpass; zenity GUI prompt. 2026-07-30, Fedora 44, sudo 1.9.17p2.                   |
+| OpenCode | Tested        | 2026-07-30, Fedora 44, `/dev/tty` fallback, `sudo -A whoami` → `root`.                                                       |
 
 ## Prompt backend compatibility
 
 By default, `SIDO_ADAPTER=auto` uses the first matching context:
 
-| Context                      | Prompt method                                    | Status                  |
-| ---------------------------- | ------------------------------------------------ | ----------------------- |
-| `$TMUX` set                  | tmux popup with Bash `read -s`; FIFO return      | Tested on Linux         |
-| `$HERDR_ENV=1`               | Temporary Herdr pane with `read -s`; FIFO return | Tested on Linux         |
-| macOS                        | Hidden `osascript` dialog                        | Implemented, unverified |
-| Linux + `$DISPLAY` / Wayland | `zenity`, then `kdialog`                         | Tested on Linux         |
-| Canonical `/dev/tty`         | Hidden `read -s` prompt on `/dev/tty`            | Fallback                |
-| Raw/no TTY                   | Watch mode: park request + FIFO, `approve`       | New                     |
+| Context                      | Prompt method                                       | Status                  |
+| ---------------------------- | --------------------------------------------------- | ----------------------- |
+| `$TMUX` set                  | tmux popup with a hidden native read; FIFO return   | Tested on Linux         |
+| `$HERDR_ENV=1`               | Temporary Herdr pane with a hidden native read      | Tested on Linux         |
+| macOS                        | Hidden `osascript` dialog                           | Implemented, unverified |
+| Linux + `$DISPLAY` / Wayland | `zenity`, then `kdialog`                            | Tested on Linux         |
+| Canonical `/dev/tty`         | Hidden native read on `/dev/tty`                    | Fallback                |
+| Raw/no TTY                   | Watch mode: park request + FIFO, `approve`          | New                     |
 
 Set `SIDO_ADAPTER` to bypass detection and require one exact adapter:
 
@@ -263,6 +267,6 @@ through a kernel FIFO; GUI and TTY backends return it through process stdout.
 Each tmux, Herdr, or watch prompt uses a private directory (mode 0700 under
 `$XDG_RUNTIME_DIR/sido` for watch) with a mode-0600 FIFO. Its FIFO and prompt
 are accessible only to the current user and are removed when prompting ends.
-Watch's approver feeds the password via stdin (`cat > fifo`), never argv, so it
-never appears in `ps`. The prompt file contains the displayed command and
+Watch's approver feeds the password through the FIFO over stdin, never argv, so
+it never appears in `ps`. The prompt file contains the displayed command and
 prompt, but never the password.

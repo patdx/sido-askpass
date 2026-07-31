@@ -1,109 +1,168 @@
 # sido-askpass
 
-Dependency-free `SUDO_ASKPASS` shim with separate manager and askpass entry
-points, a shared module, and end-to-end fixtures.
+`SUDO_ASKPASS` shim for headless agent environments. Written in Go; ships as a
+single native binary per OS (Linux x86_64, macOS arm64) distributed via npm.
 
 ## Runtime
 
-Node.js 24.x — runs `.ts` directly via built-in type stripping. No flags needed.
+- Two OS binaries: `sido-mac` (darwin/arm64), `sido-linux` (linux/amd64).
+- Two thin POSIX `sh` launchers: `sido` and `sido-askpass`. Each resolves its own
+  symlink (so it works behind npm's bin symlinks) and execs the platform binary.
+  `sido-askpass` is just an alias for `sido askpass`.
+- No Node.js, bash, or `mkfifo` required at runtime. The launchers are POSIX
+  `sh`, not bash; the only runtime shell is those two thin launchers. An adapter
+  needs its external tool (`tmux`, `herdr`, `zenity`/`kdialog`) when selected.
 
-## File
+## Repository layout
 
-- `src/sido.ts` — manager CLI entry; builds to `dist/sido.js`
-- `src/sido-askpass.ts` — askpass entry; builds to `dist/sido-askpass.js`
-- `src/shared.ts` — implementation shared by both entries
+- `go-src/` — the Go module (`module sido-go`).
+  - `internal/sido/sido.go` — all implementation (one package).
+  - `internal/sido/tty_linux.go` / `tty_darwin.go` / `tty_other.go` — termios
+    detection (`ttyFlags`) behind build tags.
+  - `internal/sido/sido_test.go` — unit tests (semver, config regexes, FIFO
+    round-trip / cancel / empty-password / timeout).
+  - `cmd/sido/main.go` — single entry point; dispatches subcommands.
+  - `test-fakes/` — fake `tmux` / `herdr` scripts for manual e2e checks.
+- `scripts/`
+  - `build-go.sh` — cross-compiles both binaries into `dist/` and copies the
+    launchers. Reads the version from `package.json` (ldflags `-X`).
+  - `sido.sh`, `sido-askpass.sh` — the launcher sources (copied into `dist/`).
+- `package.json` — npm packaging only (`bin`, `files`, `prepack` builds Go).
+- `.node-version` — kept for CI (the npm publish step runs under Node).
+
+## Entry-point dispatch (`cmd/sido/main.go`)
+
+- `sido askpass [prompt]` → `AskpassMain(args)` — the askpass protocol; the first
+  arg is the sudo/SSH prompt. This is what `sido-askpass` forwards to.
+- `sido _inner_prompt_receiver <promptFile> <fifo> <dir> <shimPid> [paneID]` →
+  `ReceiverMain(args)` — hidden subcommand. Runs inside a tmux popup / herdr
+  pane; collects the password and writes it to the FIFO. **Top-level**, not under
+  `askpass`.
+- anything else → `ManagerMain()` — `install`, `uninstall`, `status`, `upgrade`,
+  `run`, `watch`, `approve`, `--help`, `--version`.
 
 ## Usage
 
 ```bash
-export SUDO_ASKPASS=/path/to/sido-askpass   # npm global bin, or dist/sido-askpass.js
+export SUDO_ASKPASS=/path/to/sido-askpass   # npm global bin, or dist/sido-askpass
 sudo -A <command>          # or plain sudo on modern Fedora (auto-falls back when no TTY)
 ```
 
 ## Detection chain
 
-`SIDO_ADAPTER=auto` (the default) uses this chain:
+`SIDO_ADAPTER=auto` (the default) tries, in order:
 
-| Context              | Method                                                           |
-| -------------------- | ---------------------------------------------------------------- |
-| `$TMUX` set          | `tmux display-popup` + Bash `read -s`, FIFO back to parent       |
-| `$HERDR_ENV=1`       | `herdr pane split` + `pane run` **bash read**, FIFO back         |
-| macOS + GUI          | `osascript` hidden dialog                                        |
-| Linux + `$DISPLAY`   | `zenity` → `kdialog`                                             |
-| canonical `/dev/tty` | `read -s` on `/dev/tty` (interactive shell; detected via `stty`) |
-| else                 | **watch mode**: park request + FIFO, `sido approve` supplies     |
+| Context              | Method                                                       |
+| -------------------- | ------------------------------------------------------------ |
+| `$TMUX` set          | `tmux display-popup` running the receiver; FIFO return       |
+| `$HERDR_ENV=1`       | `herdr pane split` + `pane run` running the receiver         |
+| macOS + GUI          | `osascript` hidden dialog                                    |
+| Linux + `$DISPLAY`   | `zenity` → `kdialog`                                         |
+| canonical `/dev/tty` | hidden read on `/dev/tty` (interactive shell; via termios)   |
+| else                 | **watch mode**: park request + FIFO, `sido approve` supplies |
 
 `SIDO_ADAPTER=tmux|herdr|osascript|zenity|kdialog|tty|watch` forces one exact
-adapter. Forced adapters fail rather than falling back. The `run` grammar is
-`sido run [--adapter <name>] -- <command> [args...]`; `--` is required.
+adapter; forced adapters fail rather than fall back. `run` grammar:
+`sido run [--adapter <name>] -- <command> [args...]` (`--` required).
 
 ## Install / uninstall / status
 
 ```bash
-./src/sido.ts install --user       # first user install to shell startup file
-./src/sido.ts install              # reapplies detected managed scopes
-./src/sido.ts install --system      # Path askpass in /etc/sudo.conf via sudo tee
-./src/sido.ts uninstall --user      # removes managed shell entries
-./src/sido.ts uninstall --system    # reverts /etc/sudo.conf
-./src/sido.ts upgrade               # npm upgrade + refreshes managed config
-./src/sido.ts status [--user|--system]
+sido install --user        # first user install to shell startup file
+sido install               # reapplies detected managed scopes
+sido install --system      # Path askpass in /etc/sudo.conf via sudo tee
+sido uninstall --user      # removes managed shell entries
+sido uninstall --system    # reverts /etc/sudo.conf
+sido upgrade               # npm upgrade + refreshes managed config
+sido status [--user|--system]
 ```
 
-`--user` and `--system` are mutually exclusive (enforced via `parseArgs`).
+`--user` and `--system` are mutually exclusive. `install` writes the absolute
+path to the `sido-askpass` launcher into the managed block.
 
 ## Watch mode (agent-agnostic fallback)
 
-When no inline surface is safe — a TUI/agent owns the tty in raw mode (detected
-via `stty -a`: canonical+echo = interactive shell; otherwise watch), or there is
-no tty at all — the shim parks the request and blocks on a FIFO instead of
-failing. Supply the password from any second terminal:
+When no inline surface is safe, the shim parks the request and blocks on a FIFO.
+Supply the password from a second terminal:
 
 ```bash
-sido approve   # approve the most recent pending request (one-shot)
-sido watch     # long-lived: approve requests as they arrive (Ctrl-C to exit)
+sido approve   # most recent pending request (one-shot)
+sido watch     # long-lived (Ctrl-C to exit)
 ```
 
-The original terminal is hinted to run `<self> approve`. Requests live under
-`$XDG_RUNTIME_DIR/sido` (or `~/.cache/sido`), mode 0700; each request is a
-`sido-*` dir holding the prompt and a mode-0600 `password` FIFO.
+Requests live under `$XDG_RUNTIME_DIR/sido` (or `~/.cache/sido`), mode 0700; each
+is a `sido-*` dir holding the prompt and a mode-0600 `password` FIFO.
+`SIDO_ADAPTER=watch` forces it; `SIDO_WATCH_TIMEOUT=<sec>` (default 120).
 
-- `SIDO_ADAPTER=watch` — force watch mode.
-- `SIDO_WATCH_TIMEOUT=<sec>` — how long the shim waits for an approver before
-  giving up (default 120). On timeout sudo fails rather than hanging forever.
+## Architecture notes (the important stuff)
 
-This is the recommended path for `ssh` → coding agent → `sudo` without tmux/Herdr,
-and the only viable path for Codex (whose TUI cannot render a password prompt).
+- **No embedded bash.** The only shell scripts in the package are the two thin
+  POSIX `sh` launchers (`sido`, `sido-askpass`) that just exec the platform
+  binary; the adapter logic itself is pure Go. Password reads use
+  `golang.org/x/term.ReadPassword`; tty detection reads kernel termios via
+  `golang.org/x/sys/unix` `ioctl` (no `stty -a` parsing); `mkfifo` is
+  `unix.Mkfifo`; tmux/herdr/zenity/etc. are invoked with `exec.Command`
+  structured args (no shell, no quoting/injection surface).
+- **FIFO + cancel detection.** `readFifoPassword` opens the FIFO
+  `O_RDONLY|O_NONBLOCK` and classifies each `read`: `EAGAIN` = writer connected,
+  still typing; data = password; `EOF` *after* the writer connected = the
+  surface closed without a password = **cancel** (detected the instant the
+  receiver dies, even via `SIGKILL`, because the kernel closes its fd). EOF
+  *before* any writer = "not started yet" (keep waiting). This is why a closed
+  pane/popup now bails immediately instead of hanging. The earlier `O_RDWR`
+  trick was abandoned precisely because holding our own write end masked EOF.
+- **Orphan handling lives in the receiver.** The receiver process runs inside the
+  popup/pane and survives the shim. It pid-polls the shim
+  (`syscall.Kill(shimPid, 0)`, portable) and on shim death removes the temp dir
+  + closes the pane + exits → tmux `-E` / herdr `pane run` close the surface.
+  (Linux `pidfd_open` / macOS `kqueue` would be event-driven refinements.)
+- **herdr `pane run` is fire-and-forget.** `promptViaSurface` therefore waits on
+  the FIFO for the password (independent of when the UI command returns), bailing
+  only if the surface reports an error — matching the old `wait $reader` without
+  the shell.
+- **`doRun` re-raises signals.** A child killed by a signal is distinguished from
+  a spawn failure (`spawn` sets `err` only when `ProcessState == nil`) and the
+  signal is re-raised to self (`os.Exit(128 + sig)`).
+- **Self paths.** `selfPath()` = the real per-OS binary (used to spawn the
+  receiver and for the npm-package path check); `cliPath()`/`askpassPath()` are
+  the sibling `sido`/`sido-askpass` launchers (used in messages, `SUDO_ASKPASS`,
+  and install).
 
 ## Security
 
-Passwords never touch disk — tmux, Herdr, and watch mode all use FIFOs (kernel memory). TTY fallback pipes stdout directly. Watch's approver feeds the password via stdin (`cat > fifo`), never argv, so it never appears in `ps`.
+Passwords never touch disk — tmux, Herdr, and watch use FIFOs (kernel memory).
+The receiver writes the password through the FIFO; the approver feeds it over
+stdin (never argv), so it never appears in `ps`. The prompt file holds the
+displayed command and prompt, never the password.
 
 ## Developer commands
 
 ```bash
-pnpm typecheck             # tsc (noEmit is in tsconfig)
-pnpm format                # prettier --write . (idempotent; use this instead of a check-only command)
-pnpm test                   # fake tmux/Herdr commands + real FIFOs (Linux)
+cd go-src && go vet ./...           # vet
+cd go-src && go test ./...          # unit tests
+bash scripts/build-go.sh            # cross-build dist/{sido,sido-askpass,sido-mac,sido-linux}
+npm test                            # go test via package.json script
 ```
 
-Run `pnpm format` directly when verifying changes. Do not add or use a
-check-only formatting script; formatting is idempotent, so checking without
-applying it only duplicates work.
+Code style: standard Go conventions (`gofmt`, `camelCase`, exported identifiers
+capitalized). Dependencies are `golang.org/x/term` and `golang.org/x/sys` only
+(pure Go, so cross-compilation needs no cgo toolchain). `dist/` is gitignored and
+rebuilt by `prepack` before `npm publish`.
 
 ## Key details agents miss
 
 - Backward compatibility is **not** a default requirement. Prefer polishing and
   converging on the best API over preserving legacy flags or behavior. Only add
   compatibility paths when explicitly requested.
-- This is a **Node.js** project. There are no runtime deps.
-- `package.json` pins pnpm version (`packageManager`) and has dev deps only (`@types/node`, `amaro`, `prettier`, `typescript`). No runtime deps.
-- `scripts/build.ts` strips types with Amaro and writes `dist/sido.js`,
-  `dist/sido-askpass.js`, and `dist/shared.js`; there is no bundle.
-- Code style: `snake_case` for all local functions and variables, no semicolons, single quotes, `verbatimModuleSyntax` (type imports must use `import type`).
-- tmux and Herdr prompt functions use embedded bash scripts (`spawnSync('bash', ['-c', ...])`) with shell job control (`&`, `wait`) instead of native `fs` on FIFOs — this is intentional: libuv threadpool `open()` on a FIFO cannot be cancelled from JS, while the shell naturally reaps the background `cat` on cancel. The shared FIFO-drain + reap-on-cancel skeleton is built by `fifo_drain_script()`.
-- The entry point selects the interface: `sido-askpass` always treats its first
-  positional argument as the sudo/SSH prompt, while `sido` exclusively parses
-  CLI subcommands. Each npm bin name points to its dedicated runtime file.
-- Adapter selection is `SIDO_ADAPTER=auto|tmux|herdr|osascript|zenity|kdialog|tty|watch`; `auto` is the default, while every explicit adapter is exact and must not fall back. `run` accepts `--adapter <name>` before its required `--` command separator.
-- Watch mode is the final fallback when there's no usable inline surface. The tty-vs-watch decision uses a **termios heuristic**: `stty -a < /dev/tty` is parsed for `icanon`+`echo` (canonical → interactive shell → inline `read -s`); a raw-mode tty (a TUI/agent owns the screen) or no tty at all → watch. `stty -a` is read-only and never alters the owning app's terminal state. `SIDO_ADAPTER=watch` forces watch and bypasses detection.
-- Watch parks each request under `$XDG_RUNTIME_DIR/sido` (or `~/.cache/sido`) as a `sido-*` dir (mode 0700) with a mode-0600 `password` FIFO. The shim blocks on a child `cat` of the FIFO with a `spawnSync` timeout (`SIDO_WATCH_TIMEOUT`, default 120s) — killable, unlike a libuv FIFO `open()`. The approver (`approve`/`watch`) writes the password via stdin (`cat > fifo`), never argv.
+- The TS/Node implementation has been **removed**; Go is now the sole
+  implementation. There is no `src/`, no `tsc`, no `prettier`.
+- `.node-version` is kept only because CI publishes to npm (which needs the npm
+  CLI / Node) — the tool itself does not require Node.
+- `sido-askpass` is a shell-launcher alias for `sido askpass`; the hidden
+  `_inner_prompt_receiver` is a **top-level** subcommand, not under `askpass`.
+- tmux's `display-popup -E` still runs one fixed shell string (tmux's contract);
+  it is built from trusted env vars (`$SIDO_BIN`, `$SIDO_PROMPT`, …), never user
+  input. That is the only shell involved anywhere, and it is tmux's, not ours.
+- Manual e2e: put fakes on `PATH` (see `go-src/test-fakes/`), unset
+  `DISPLAY`/`WAYLAND_DISPLAY` so failures don't fall through to a GUI dialog, and
+  wrap calls in `timeout` so a regression fails fast instead of hanging.

@@ -1,10 +1,5 @@
 #!/usr/bin/env bash
 
-if [ "$1" = '_inner_prompt_receiver' ]; then
-  printf '%s\n' "$$" > "$SIDO_E2E_RECEIVER_LOG"
-  while true; do sleep 1; done
-fi
-
 case "$1 $2" in
   'pane layout')
     printf '%s\n' '{"result":{"pane":{"width":200}}}'
@@ -16,14 +11,20 @@ case "$1 $2" in
     printf '%s\n' '{"result":{"pane":{"pane_id":"fake-pane"}}}'
     ;;
   'pane run')
+    # exec-array layout: $3=paneID $4=receiverBin $5=_inner_prompt_receiver
+    #                   $6=promptFile $7=fifo $8=dir $9=shimPid $10=paneID
     if [ "${SIDO_E2E_MODE:-}" = 'fail' ]; then
       exit 42
     fi
     if [ "${SIDO_E2E_MODE:-}" = 'orphan' ]; then
-      exec bash -c "$6" sido \
-        "$0" "${9}" "${10}" "${11}" "${12}" "${13}"
+      # Simulate a blocking receiver: hold the FIFO write end open (so the
+      # shim sees a connected writer) and log our pid. Real orphan cleanup is
+      # exercised by running the real receiver under a pty.
+      ( exec 3>"$7"; while true; do sleep 1; done ) &
+      echo "$!" > "$SIDO_E2E_RECEIVER_LOG"
+      exit 0
     fi
-    printf '%s\n' 'fake-password' > "${10}"
+    printf '%s\n' 'fake-password' > "$7"
     ;;
   'pane close')
     printf '%s\n' "$3" >> "$SIDO_E2E_PANE_LOG"
