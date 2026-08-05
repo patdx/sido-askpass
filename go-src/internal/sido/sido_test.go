@@ -3,7 +3,6 @@ package sido
 import (
 	"context"
 	"errors"
-	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -310,61 +309,5 @@ func TestPromptViaSurfaceBailsOnUIError(t *testing.T) {
 	}
 	if _, err := promptViaSurface(fifo, func() error { return errors.New("surface failed") }); err == nil {
 		t.Fatal("expected promptViaSurface to return the error from a failed UI command")
-	}
-}
-
-// readHiddenLine must distinguish a genuine EOF (fall through to another
-// adapter) from an empty password (Enter with nothing typed). Verified with a
-// pipe since the logic is identical to a canonical tty at the byte level.
-func TestReadHiddenLinePassword(t *testing.T) {
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	go func() { w.Write([]byte("secret\n")); w.Close() }()
-	line, err := readHiddenLine(r)
-	r.Close()
-	if err != nil {
-		t.Fatalf("readHiddenLine: %v", err)
-	}
-	if line != "secret" {
-		t.Errorf("got %q, want %q", line, "secret")
-	}
-}
-
-func TestReadHiddenLineEmptyPassword(t *testing.T) {
-	r, w, _ := os.Pipe()
-	go func() { w.Write([]byte("\n")); w.Close() }()
-	line, err := readHiddenLine(r)
-	r.Close()
-	if err != nil {
-		t.Fatalf("empty password should be nil err, got %v", err)
-	}
-	if line != "" {
-		t.Errorf("got %q, want empty", line)
-	}
-}
-
-func TestReadHiddenLineEOF(t *testing.T) {
-	r, w, _ := os.Pipe()
-	w.Close() // EOF with no input
-	line, err := readHiddenLine(r)
-	r.Close()
-	if err != io.EOF {
-		t.Fatalf("EOF should return io.EOF, got %v (line=%q)", err, line)
-	}
-}
-
-// Raw/cbreak ttys deliver '\r' (ICRNL off) on Enter — must terminate the line.
-func TestReadHiddenLineCarriageReturn(t *testing.T) {
-	r, w, _ := os.Pipe()
-	go func() { w.Write([]byte("pw\r")); w.Close() }()
-	line, err := readHiddenLine(r)
-	r.Close()
-	if err != nil {
-		t.Fatalf("readHiddenLine: %v", err)
-	}
-	if line != "pw" {
-		t.Errorf("got %q, want %q", line, "pw")
 	}
 }

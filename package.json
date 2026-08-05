@@ -1,6 +1,6 @@
 {
   "name": "sido-askpass",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "description": "SUDO_ASKPASS shim for headless agent environments (tmux, Herdr, GUI, TTY)",
   "license": "MIT",
   "bin": {

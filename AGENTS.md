@@ -101,8 +101,9 @@ is a `sido-*` dir holding the prompt and a mode-0600 `password` FIFO.
   binary; the adapter logic itself is pure Go. Password reads use
   `golang.org/x/term.ReadPassword`; tty detection reads kernel termios via
   `golang.org/x/sys/unix` `ioctl` (no `stty -a` parsing); `mkfifo` is
-  `unix.Mkfifo`; tmux/herdr/zenity/etc. are invoked with `exec.Command`
-  structured args (no shell, no quoting/injection surface).
+  `unix.Mkfifo`; semver comparison is `golang.org/x/mod/semver`; subcommand flags
+  are parsed with the std `flag` package; tmux/herdr/zenity/etc. are invoked with
+  `exec.Command` structured args (no shell, no quoting/injection surface).
 - **FIFO + cancel detection.** `readFifoPassword` opens the FIFO
   `O_RDONLY|O_NONBLOCK` and classifies each `read`: `EAGAIN` = writer connected,
   still typing; data = password; `EOF` *after* the writer connected = the
@@ -145,9 +146,9 @@ npm test                            # go test via package.json script
 ```
 
 Code style: standard Go conventions (`gofmt`, `camelCase`, exported identifiers
-capitalized). Dependencies are `golang.org/x/term` and `golang.org/x/sys` only
-(pure Go, so cross-compilation needs no cgo toolchain). `dist/` is gitignored and
-rebuilt by `prepack` before `npm publish`.
+capitalized). Dependencies are `golang.org/x/term`, `golang.org/x/mod/semver`,
+and `golang.org/x/sys` only (pure Go, so cross-compilation needs no cgo
+toolchain). `dist/` is gitignored and rebuilt by `prepack` before `npm publish`.
 
 ## Key details agents miss
 

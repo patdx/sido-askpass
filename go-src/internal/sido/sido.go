@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"math"
@@ -21,7 +22,9 @@ import (
 	"time"
 	"unicode"
 
+	"golang.org/x/mod/semver"
 	"golang.org/x/sys/unix"
+	"golang.org/x/term"
 )
 
 var Version = "0.0.0-dev"
@@ -183,11 +186,14 @@ func readSecret(prompt string) (string, error) {
 	}
 	defer tty.Close()
 
-	restore, err := ttyEchoOff(int(tty.Fd()))
+	fd := int(tty.Fd())
+	// Grab the state ourselves so the signal handler can restore echo; x/term's
+	// own restore is a deferred call that os.Exit skips.
+	state, err := term.GetState(fd)
 	if err != nil {
 		return "", err
 	}
-	defer restore()
+	restore := func() { _ = term.Restore(fd, state) }
 
 	// Restore echo if the user interrupts so the terminal isn't left hidden.
 	// signal.Stop is essential: a leaked registration would keep suppressing
@@ -209,34 +215,9 @@ func readSecret(prompt string) (string, error) {
 	if _, err := tty.WriteString(prompt); err != nil {
 		return "", err
 	}
-	pw, err := readHiddenLine(tty)
+	pw, err := term.ReadPassword(fd)
 	tty.WriteString("\n")
-	return pw, err
-}
-
-// readHiddenLine reads one line from a canonical-mode tty with echo disabled. A
-// genuine EOF (Ctrl-D / closed tty) returns io.EOF so the caller can fall
-// through to another adapter, while pressing Enter with nothing typed returns an
-// empty password — matching what the old `bash read -s` did.
-func readHiddenLine(tty *os.File) (string, error) {
-	var line []byte
-	var one [1]byte
-	for {
-		n, err := tty.Read(one[:])
-		if n > 0 {
-			// Canonical ttys deliver '\n' on Enter; raw/cbreak ttys deliver
-			// '\r' (ICRNL off). Accept both as end-of-line.
-			if one[0] == '\n' || one[0] == '\r' {
-				return string(line), nil
-			}
-			line = append(line, one[0])
-			continue
-		}
-		if err != nil {
-			return "", err
-		}
-		return "", io.EOF // n == 0, no error → EOF
-	}
+	return string(pw), err
 }
 
 // ── FIFO helpers ─────────────────────────────────────────────────────────────
@@ -1218,104 +1199,25 @@ func doUpgrade(force bool) {
 
 // ── semver comparison ────────────────────────────────────────────────────────
 
-var semverRe = regexp.MustCompile(`^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$`)
-
+// compareSemver compares two semver strings (with or without a "v" prefix) and
+// returns their precedence plus whether both parsed. It delegates to
+// golang.org/x/mod/semver, the reference implementation used by the go command.
 func compareSemver(left, right string) (int, bool) {
-	parse := func(value string) (core [3]int, prerelease []string, ok bool) {
-		m := semverRe.FindStringSubmatch(value)
-		if m == nil {
-			return [3]int{}, nil, false
-		}
-		core[0], _ = strconv.Atoi(m[1])
-		core[1], _ = strconv.Atoi(m[2])
-		core[2], _ = strconv.Atoi(m[3])
-		if m[4] != "" {
-			prerelease = strings.Split(m[4], ".")
-		}
-		return core, prerelease, true
-	}
-
-	aCore, aPre, aOk := parse(left)
-	bCore, bPre, bOk := parse(right)
-	if !aOk || !bOk {
+	l := canonicalSemver(left)
+	r := canonicalSemver(right)
+	if !semver.IsValid(l) || !semver.IsValid(r) {
 		return 0, false
 	}
-
-	for i := 0; i < 3; i++ {
-		if aCore[i] != bCore[i] {
-			if aCore[i] < bCore[i] {
-				return -1, true
-			}
-			return 1, true
-		}
-	}
-
-	if aPre == nil && bPre == nil {
-		return 0, true
-	}
-	if aPre == nil {
-		return 1, true
-	}
-	if bPre == nil {
-		return -1, true
-	}
-
-	maxLen := len(aPre)
-	if len(bPre) > maxLen {
-		maxLen = len(bPre)
-	}
-
-	for i := 0; i < maxLen; i++ {
-		var x, y string
-		if i < len(aPre) {
-			x = aPre[i]
-		}
-		if i < len(bPre) {
-			y = bPre[i]
-		}
-		if x == "" {
-			return -1, true
-		}
-		if y == "" {
-			return 1, true
-		}
-		if x == y {
-			continue
-		}
-		xNum := isNumeric(x)
-		yNum := isNumeric(y)
-		if xNum && yNum {
-			xn, _ := strconv.Atoi(x)
-			yn, _ := strconv.Atoi(y)
-			if xn < yn {
-				return -1, true
-			}
-			return 1, true
-		}
-		if xNum != yNum {
-			if xNum {
-				return -1, true
-			}
-			return 1, true
-		}
-		if x < y {
-			return -1, true
-		}
-		return 1, true
-	}
-	return 0, true
+	return semver.Compare(l, r), true
 }
 
-func isNumeric(s string) bool {
-	if s == "" {
-		return false
+// canonicalSemver adds the "v" prefix x/mod/semver requires, since our inputs
+// (ldflags Version, npm `view` output) never carry it.
+func canonicalSemver(v string) string {
+	if v == "" || v[0] == 'v' {
+		return v
 	}
-	for _, c := range s {
-		if c < '0' || c > '9' {
-			return false
-		}
-	}
-	return true
+	return "v" + v
 }
 
 // ── parseAdapter ─────────────────────────────────────────────────────────────
@@ -1338,34 +1240,44 @@ func parseRunArgs(args []string) (command string, cmdArgs []string, adapter stri
 		}
 	}
 	if sepIdx == -1 || sepIdx+1 >= len(args) {
-		fmt.Fprintf(os.Stderr, "[sido] usage: %s run [--adapter <name>] -- <command> [args...]\n", cliPath())
-		os.Exit(1)
+		runUsage()
 	}
 
-	for i := 0; i < sepIdx; i++ {
-		a := args[i]
-		switch {
-		case a == "--adapter":
-			if i+1 >= sepIdx {
-				fmt.Fprintln(os.Stderr, "[sido] option --adapter requires an argument")
-				os.Exit(1)
-			}
-			i++
-			adapter = parseAdapter(args[i])
-		case strings.HasPrefix(a, "--adapter="):
-			adapter = parseAdapter(strings.TrimPrefix(a, "--adapter="))
-		case strings.HasPrefix(a, "-") && a != "-":
-			fmt.Fprintf(os.Stderr, "[sido] unknown or unexpected option: %s\n", a)
-			os.Exit(1)
-		default:
-			fmt.Fprintf(os.Stderr, "[sido] unexpected argument before --: %s\n", a)
-			os.Exit(1)
-		}
+	fs := flag.NewFlagSet("run", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	adapterName := fs.String("adapter", "", "adapter name")
+	if err := fs.Parse(args[:sepIdx]); err != nil || fs.NArg() > 0 {
+		runUsage()
 	}
 
 	command = args[sepIdx+1]
 	cmdArgs = args[sepIdx+2:]
+	if *adapterName != "" {
+		adapter = parseAdapter(*adapterName)
+	}
 	return
+}
+
+func runUsage() {
+	fmt.Fprintf(os.Stderr, "[sido] usage: %s run [--adapter <name>] -- <command> [args...]\n", cliPath())
+	os.Exit(1)
+}
+
+// newFlagSet returns a quiet flag set for a subcommand; parse errors are
+// reported by the caller with a tailored usage line.
+func newFlagSet(name string) *flag.FlagSet {
+	fs := flag.NewFlagSet(name, flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	return fs
+}
+
+func scopeUsageExit(command string) {
+	usage := "[--user|--system]"
+	if command == "uninstall" {
+		usage = "--user|--system"
+	}
+	fmt.Fprintf(os.Stderr, "[sido] usage: %s %s %s\n", cliPath(), command, usage)
+	os.Exit(1)
 }
 
 // ── doRun ────────────────────────────────────────────────────────────────────
@@ -1534,30 +1446,19 @@ func ManagerMain() {
 	}
 
 	if command == "install" || command == "uninstall" {
-		user := false
-		system := false
-		for i := 2; i < len(os.Args); i++ {
-			if os.Args[i] == "--user" {
-				user = true
-			}
-			if os.Args[i] == "--system" {
-				system = true
-			}
+		fs := newFlagSet(command)
+		user := fs.Bool("user", false, "manage the current user's shell startup files")
+		system := fs.Bool("system", false, "manage the system-wide sudo.conf")
+		if fs.Parse(os.Args[2:]) != nil {
+			scopeUsageExit(command)
 		}
-		if (user && system) || (command == "uninstall" && !user && !system) {
-			scopeUsage := "[--user|--system]"
-			if command == "install" {
-				scopeUsage = "[--user|--system]"
-			} else {
-				scopeUsage = "--user|--system"
-			}
-			fmt.Fprintf(os.Stderr, "[sido] usage: %s %s %s\n", cliPath(), command, scopeUsage)
-			os.Exit(1)
+		if (*user && *system) || (command == "uninstall" && !*user && !*system) {
+			scopeUsageExit(command)
 		}
 		scope := ""
-		if user {
+		if *user {
 			scope = "--user"
-		} else if system {
+		} else if *system {
 			scope = "--system"
 		}
 		if command == "install" {
@@ -1569,24 +1470,17 @@ func ManagerMain() {
 	}
 
 	if command == "status" {
-		user := false
-		system := false
-		for i := 2; i < len(os.Args); i++ {
-			if os.Args[i] == "--user" {
-				user = true
-			}
-			if os.Args[i] == "--system" {
-				system = true
-			}
-		}
-		if user && system {
+		fs := newFlagSet(command)
+		user := fs.Bool("user", false, "show the user install")
+		system := fs.Bool("system", false, "show the system install")
+		if fs.Parse(os.Args[2:]) != nil || (*user && *system) {
 			fmt.Fprintf(os.Stderr, "[sido] usage: %s status [--user|--system]\n", cliPath())
 			os.Exit(1)
 		}
 		scope := ""
-		if user {
+		if *user {
 			scope = "--user"
-		} else if system {
+		} else if *system {
 			scope = "--system"
 		}
 		doStatus(scope)
@@ -1594,13 +1488,13 @@ func ManagerMain() {
 	}
 
 	if command == "upgrade" || command == "update" {
-		force := false
-		for i := 2; i < len(os.Args); i++ {
-			if os.Args[i] == "--force" {
-				force = true
-			}
+		fs := newFlagSet(command)
+		force := fs.Bool("force", false, "upgrade even if already up to date")
+		if fs.Parse(os.Args[2:]) != nil {
+			fmt.Fprintf(os.Stderr, "[sido] usage: %s %s [--force]\n", cliPath(), command)
+			os.Exit(1)
 		}
-		doUpgrade(force)
+		doUpgrade(*force)
 	}
 
 	if command == "run" {
