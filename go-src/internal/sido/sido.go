@@ -1198,17 +1198,19 @@ func refreshManagedConfiguration() {
 	os.Exit(res.status)
 }
 
-func doUpgrade() {
+func doUpgrade(force bool) {
 	requireNpmInstall()
 	latest := latestNpmVersion()
-	cmp, ok := compareSemver(Version, latest)
-	if !ok {
-		fmt.Fprintf(os.Stderr, "[sido] cannot compare versions %s and %s\n", Version, latest)
-		os.Exit(1)
-	}
-	if cmp >= 0 {
-		fmt.Fprintf(os.Stderr, "[sido] already up to date (%s; npm latest is %s)\n", Version, latest)
-		os.Exit(0)
+	if !force {
+		cmp, ok := compareSemver(Version, latest)
+		if !ok {
+			fmt.Fprintf(os.Stderr, "[sido] cannot compare versions %s and %s\n", Version, latest)
+			os.Exit(1)
+		}
+		if cmp >= 0 {
+			fmt.Fprintf(os.Stderr, "[sido] already up to date (%s; npm latest is %s)\n", Version, latest)
+			os.Exit(0)
+		}
 	}
 	runNpmUpgrade(latest)
 	refreshManagedConfiguration()
@@ -1488,7 +1490,8 @@ Repo:    https://github.com/patdx/sido-askpass
 Usage:
   sido install [--user|--system]
   sido uninstall --user|--system
-  sido upgrade                       upgrade an npm install and refresh its config
+  sido upgrade [--force]             upgrade an npm install and refresh its config
+  sido update [--force]              alias for upgrade
   sido status [--user|--system]
   sido run [--adapter <name>] -- <command> [args...]
                                      run a command with SUDO_ASKPASS set
@@ -1590,8 +1593,14 @@ func ManagerMain() {
 		os.Exit(0)
 	}
 
-	if command == "upgrade" {
-		doUpgrade()
+	if command == "upgrade" || command == "update" {
+		force := false
+		for i := 2; i < len(os.Args); i++ {
+			if os.Args[i] == "--force" {
+				force = true
+			}
+		}
+		doUpgrade(force)
 	}
 
 	if command == "run" {

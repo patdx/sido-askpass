@@ -234,13 +234,14 @@ configuration:
 
 ```bash
 sido upgrade
+sido update          # alias for upgrade
 ```
 
 The upgrade command currently supports npm global installations only and
 rejects commands installed by another package manager. It checks the latest
-published version, upgrades only when that version is newer, then runs
-`sido install` to refresh the existing managed configuration. If npm
-fails, existing configuration is left unchanged.
+published version, upgrades only when that version is newer (or always with
+`--force`), then runs `sido install` to refresh the existing managed
+configuration. If npm fails, existing configuration is left unchanged.
 
 Inspect the active environment and installed configuration:
 
