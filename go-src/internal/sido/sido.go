@@ -346,6 +346,11 @@ func writeToFifo(fifo, password string, timeout time.Duration) error {
 // ── inner prompt receiver ───────────────────────────────────────────────────
 
 func innerPromptReceiver(promptFile, fifo, dir, shimPid, paneID string) {
+	if err := validatePromptResources(promptFile, fifo, dir); err != nil {
+		fmt.Fprintf(os.Stderr, "[sido] invalid prompt resources: %s\n", err)
+		os.Exit(1)
+	}
+
 	pid, _ := strconv.Atoi(shimPid)
 	cleanup := func() {
 		if dir != "" {
@@ -396,6 +401,36 @@ func innerPromptReceiver(promptFile, fifo, dir, shimPid, paneID string) {
 
 	fmt.Fprintf(w, "%s\n", pw)
 	cleanup()
+}
+
+// validatePromptResources confines the receiver's cleanup authority to the
+// private directory layout created by createPromptResources. ReceiverMain is a
+// hidden command, but it is still externally invokable; without this check an
+// arbitrary dir argument could reach cleanup's RemoveAll on an error path.
+func validatePromptResources(promptFile, fifo, dir string) error {
+	if dir == "" || !filepath.IsAbs(dir) || filepath.Base(dir) == "." ||
+		!strings.HasPrefix(filepath.Base(dir), "sido-") {
+		return errors.New("invalid resource directory")
+	}
+	cleanDir := filepath.Clean(dir)
+	if filepath.Clean(promptFile) != filepath.Join(cleanDir, "prompt") ||
+		filepath.Clean(fifo) != filepath.Join(cleanDir, "password") {
+		return errors.New("resource paths do not match directory")
+	}
+
+	dirInfo, err := os.Lstat(cleanDir)
+	if err != nil || !dirInfo.IsDir() || dirInfo.Mode().Perm() != 0700 {
+		return errors.New("resource directory is not a private directory")
+	}
+	promptInfo, err := os.Lstat(promptFile)
+	if err != nil || !promptInfo.Mode().IsRegular() || promptInfo.Mode().Perm() != 0600 {
+		return errors.New("prompt is not a private regular file")
+	}
+	fifoInfo, err := os.Lstat(fifo)
+	if err != nil || fifoInfo.Mode()&os.ModeNamedPipe == 0 || fifoInfo.Mode().Perm() != 0600 {
+		return errors.New("password endpoint is not a private FIFO")
+	}
+	return nil
 }
 
 func getRequestingCommand() string {

@@ -211,6 +211,57 @@ func TestFifoRoundTrip(t *testing.T) {
 	}
 }
 
+func TestValidatePromptResources(t *testing.T) {
+	base := t.TempDir()
+	resources, err := createPromptResources(base)
+	if err != nil {
+		t.Fatalf("createPromptResources: %v", err)
+	}
+	defer removePromptResources(resources)
+
+	if err := validatePromptResources(resources.promptFile, resources.fifo, resources.dir); err != nil {
+		t.Fatalf("valid resources rejected: %v", err)
+	}
+	if err := validatePromptResources(resources.promptFile, resources.fifo, base); err == nil {
+		t.Fatal("expected unrelated cleanup directory to be rejected")
+	}
+	if err := validatePromptResources(resources.promptFile, filepath.Join(resources.dir, "other"), resources.dir); err == nil {
+		t.Fatal("expected mismatched FIFO path to be rejected")
+	}
+}
+
+func TestValidatePromptResourcesRejectsUnsafeFileTypes(t *testing.T) {
+	base := t.TempDir()
+	dir := filepath.Join(base, "sido-forged")
+	if err := os.Mkdir(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	promptFile := filepath.Join(dir, "prompt")
+	fifo := filepath.Join(dir, "password")
+	if err := os.WriteFile(promptFile, []byte("prompt"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fifo, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := validatePromptResources(promptFile, fifo, dir); err == nil {
+		t.Fatal("expected regular password file to be rejected")
+	}
+	if err := os.Remove(fifo); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Mkfifo(fifo, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := validatePromptResources(promptFile, fifo, dir); err == nil {
+		t.Fatal("expected non-private resource directory to be rejected")
+	}
+}
+
 // An empty password (NOPASSWD) must round-trip distinctly from a timeout/error.
 func TestFifoEmptyPasswordRoundTrip(t *testing.T) {
 	dir := t.TempDir()
