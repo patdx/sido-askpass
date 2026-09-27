@@ -55,7 +55,8 @@ sudo -A <command>          # or plain sudo on modern Fedora (auto-falls back whe
 | Context              | Method                                                       |
 | -------------------- | ------------------------------------------------------------ |
 | `$TMUX` set          | `tmux display-popup` running the receiver; FIFO return       |
-| `$HERDR_ENV=1`       | `herdr pane split` + `pane run` running the receiver         |
+| `$HERDR_ENV=1` + canonical `/dev/tty` | hidden read on `/dev/tty`                   |
+| `$HERDR_ENV=1` otherwise | `herdr pane split` + `pane run` running the receiver |
 | macOS + GUI          | `osascript` hidden dialog                                    |
 | Linux + `$DISPLAY`   | `zenity` → `kdialog`                                         |
 | canonical `/dev/tty` | hidden read on `/dev/tty` (interactive shell; via termios)   |

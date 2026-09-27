@@ -1397,6 +1397,9 @@ func dispatchAdapter() {
 		return
 	}
 	if isHerdr {
+		if interactiveShellTty() && ttyPrompt() {
+			return
+		}
 		herdrPrompt(true)
 		return
 	}
