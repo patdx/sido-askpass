@@ -10,10 +10,10 @@ without a usable TTY.
 When sudo uses askpass, `sido-askpass` opens a hidden password prompt and
 returns the password to sudo. Passwords never touch a regular file.
 
-`sido` is written in Go and ships as a single native binary per platform
-(Linux x86_64 and macOS arm64), distributed through npm. The `sido` and
+`sido` is written in Go and ships as one native binary per OS and architecture
+(Linux and macOS, x86_64 and arm64), distributed through npm. The `sido` and
 `sido-askpass` executables are tiny POSIX `sh` launchers that pick the right
-binary for your OS; `sido-askpass` is just an alias for `sido askpass`. No
+binary for your platform; `sido-askpass` is just an alias for `sido askpass`. No
 Node.js or bash is required at runtime.
 
 Works with:
@@ -27,10 +27,11 @@ Works with:
 - **Raw terminals** — `/dev/tty` fallback when an interactive shell owns the TTY
 - **Watch mode** — approve from a second terminal when a TUI/agent owns the TTY (e.g. `ssh` → coding agent → `sudo` with no tmux/Herdr)
 
-Supports Linux (x86_64) and macOS (arm64). Distributed as native binaries — no
-Node.js or bash at runtime. tmux/Herdr/GUI prompting requires the respective
-external tool (`tmux`, `herdr`, or `zenity`/`kdialog`); the `/dev/tty` and watch
-backends need only a POSIX shell (for the launcher). Windows is not supported.
+Supports Linux and macOS on both x86_64 and arm64 (Intel/AMD and Apple Silicon).
+Distributed as native binaries — no Node.js or bash at runtime. tmux/Herdr/GUI
+prompting requires the respective external tool (`tmux`, `herdr`, or
+`zenity`/`kdialog`); the `/dev/tty` and watch backends need only a POSIX shell
+(for the launcher). Windows is not supported.
 
 ## Quick start
 
