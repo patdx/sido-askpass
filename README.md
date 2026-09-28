@@ -37,7 +37,8 @@ backends need only a POSIX shell (for the launcher). Windows is not supported.
 The package installs two executable names: `sido` is the command-line interface,
 while `sido-askpass` is reserved for the askpass protocol (it is an alias for
 `sido askpass` and treats its first argument as a prompt). Both are shell
-launchers that exec the platform binary (`sido-mac` / `sido-linux`).
+launchers that pick the binary for the current OS and architecture
+(`sido-linux-amd64`, `sido-linux-arm64`, `sido-darwin-amd64`, `sido-darwin-arm64`).
 
 ### User setup (recommended)
 

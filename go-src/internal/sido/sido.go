@@ -31,7 +31,7 @@ var Version = "0.0.0-dev"
 
 // ── paths ─────────────────────────────────────────────────────────────────────
 
-// selfPath is the real per-OS binary (sido-mac / sido-linux) — used to spawn
+// selfPath is the real per-OS/arch binary (sido-<os>-<arch>) — used to spawn
 // the inner prompt receiver directly and for the npm-package path check.
 func selfPath() string {
 	exe, err := os.Executable()

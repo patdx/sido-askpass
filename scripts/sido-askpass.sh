@@ -1,6 +1,7 @@
 #!/bin/sh
-# sido-askpass — thin alias for `sido askpass`. sudo points SUDO_ASKPASS here;
-# this launcher picks the right platform binary and forwards to askpass mode.
+# sido-askpass — thin alias for `sido askpass`. sudo points SUDO_ASKPASS here.
+# It resolves its own symlink and hands off to the sibling `sido` launcher, so
+# platform detection lives in exactly one place.
 self=$0
 i=0
 while [ -L "$self" ] && [ "$i" -lt 20 ]; do
@@ -12,6 +13,4 @@ while [ -L "$self" ] && [ "$i" -lt 20 ]; do
 	i=$((i + 1))
 done
 bin=$(cd "$(dirname "$self")" && pwd)
-exe=$bin/sido-linux
-[ "$(uname)" = Darwin ] && exe=$bin/sido-mac
-exec "$exe" askpass "$@"
+exec "$bin/sido" askpass "$@"

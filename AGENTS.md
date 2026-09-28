@@ -1,14 +1,17 @@
 # sido-askpass
 
-`SUDO_ASKPASS` shim for headless agent environments. Written in Go; ships as a
-single native binary per OS (Linux x86_64, macOS arm64) distributed via npm.
+`SUDO_ASKPASS` shim for headless agent environments. Written in Go; ships as one
+native binary per OS/arch (Linux and macOS × x86_64 and arm64) distributed via
+npm.
 
 ## Runtime
 
-- Two OS binaries: `sido-mac` (darwin/arm64), `sido-linux` (linux/amd64).
+- Four binaries, one per OS/arch: `sido-linux-amd64`, `sido-linux-arm64`,
+  `sido-darwin-amd64`, `sido-darwin-arm64`.
 - Two thin POSIX `sh` launchers: `sido` and `sido-askpass`. Each resolves its own
-  symlink (so it works behind npm's bin symlinks) and execs the platform binary.
-  `sido-askpass` is just an alias for `sido askpass`.
+  symlink (so it works behind npm's bin symlinks). `sido` maps `uname -s`/`uname -m`
+  onto a `sido-<os>-<arch>` name and execs it; `sido-askpass` is a thin alias that
+  hands off to the sibling `sido` launcher, so platform detection lives in one place.
 - No Node.js, bash, or `mkfifo` required at runtime. The launchers are POSIX
   `sh`, not bash; the only runtime shell is those two thin launchers. An adapter
   needs its external tool (`tmux`, `herdr`, `zenity`/`kdialog`) when selected.
@@ -21,10 +24,16 @@ single native binary per OS (Linux x86_64, macOS arm64) distributed via npm.
     detection (`ttyFlags`) behind build tags.
   - `internal/sido/sido_test.go` — unit tests (semver, config regexes, FIFO
     round-trip / cancel / empty-password / timeout).
+  - `internal/sido/e2e_test.go` — end-to-end tests. Builds the host binary, installs
+    the real launchers, and drives them through the `test-fakes` stubs plus
+    generated npm/sudo stubs. Isolates HOME/TMPDIR/XDG_RUNTIME_DIR per test.
+  - `internal/sido/launcher_test.go` — shell-launcher platform mapping, using stub
+    binaries and a fake `uname` so all four OS/arch mappings are covered from any host.
   - `cmd/sido/main.go` — single entry point; dispatches subcommands.
-  - `test-fakes/` — fake `tmux` / `herdr` scripts for manual e2e checks.
+  - `test-fakes/` — fake `tmux` / `herdr` scripts, used by the e2e tests (driven by
+    `SIDO_E2E_MODE` / `SIDO_E2E_*_LOG` env vars) and usable for manual checks.
 - `scripts/`
-  - `build-go.sh` — cross-compiles both binaries into `dist/` and copies the
+  - `build-go.sh` — cross-compiles all four binaries into `dist/` and copies the
     launchers. Reads the version from `package.json` (ldflags `-X`).
   - `sido.sh`, `sido-askpass.sh` — the launcher sources (copied into `dist/`).
 - `package.json` — npm packaging only (`bin`, `files`, `prepack` builds Go).
@@ -141,8 +150,8 @@ displayed command and prompt, never the password.
 
 ```bash
 cd go-src && go vet ./...           # vet
-cd go-src && go test ./...          # unit tests
-bash scripts/build-go.sh            # cross-build dist/{sido,sido-askpass,sido-mac,sido-linux}
+cd go-src && go test ./...          # unit + e2e tests (e2e skipped with -short)
+bash scripts/build-go.sh            # cross-build all four dist binaries + launchers
 npm test                            # go test via package.json script
 ```
 
@@ -165,6 +174,8 @@ toolchain). `dist/` is gitignored and rebuilt by `prepack` before `npm publish`.
 - tmux's `display-popup -E` still runs one fixed shell string (tmux's contract);
   it is built from trusted env vars (`$SIDO_BIN`, `$SIDO_PROMPT`, …), never user
   input. That is the only shell involved anywhere, and it is tmux's, not ours.
-- Manual e2e: put fakes on `PATH` (see `go-src/test-fakes/`), unset
+- E2e tests live in `go-src/internal/sido/e2e_test.go` and build the real binary;
+  they do not need a manual setup step. For a manual check instead: put fakes on
+  `PATH` (see `go-src/test-fakes/`), unset
   `DISPLAY`/`WAYLAND_DISPLAY` so failures don't fall through to a GUI dialog, and
   wrap calls in `timeout` so a regression fails fast instead of hanging.
